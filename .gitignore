@@ -1,0 +1,12 @@
+
+# Gandal dataset
+Dataset_Gandal/Data/preprocessedData/*
+Dataset_Gandal/Data/Results/*
+
+# NCBI zip files (too heavy)
+NCBI/Data/*.gz
+
+# .Rhistory
+.Rhistory
+*/.Rhistory
+*/*/.Rhistory

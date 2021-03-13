@@ -1,0 +1,115 @@
+---
+title: 'Clean Data'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, echo=TRUE, include=FALSE}
+library(tidyverse)
+library(expss)
+library(knitr)
+library(data.table)
+```
+
+<br>
+
+Data was downloaded from the [NCBI's](https://www.ncbi.nlm.nih.gov/home/download/) website, specificly from [here](ftp://ftp.ncbi.nlm.nih.gov/gene/DATA/) on the 7th of February 2020 (same date as when the files where last modified)
+
+The files that were downloaded were:
+
+- gene2ensembl.gz
+
+- gene_info.gz
+
+<br>
+
+## gene2ensembl.gz
+
+It includes information from many genomes, filtering for tax_id=9606 we keep the genes belonging to the human genome
+
+```{r load_gene2ensembl}
+gene2ensembl = fread(file='./../Data/20_02_07_gene2ensembl.gz')
+gene2ensembl = gene2ensembl %>% filter(`#tax_id` == 9606)
+
+print(paste0('Dataset contains ', nrow(gene2ensembl),' rows with information from ',
+             length(unique(gene2ensembl$Ensembl_gene_identifier)), ' genes'))
+
+kable(gene2ensembl %>% head(20))
+```
+
+<br>
+
+## gene_info.gz
+
+It includes information from many genomes, filtering for tax_id=9606 we keep the genes belonging to the human genome
+
+```{r load_gene_info}
+gene_info = fread(file='./../Data/20_02_07_gene_info.gz')
+gene_info = gene_info %>% filter(`#tax_id` == 9606)
+
+print(paste('Column Names: ', paste(colnames(gene_info), collapse=', ')))
+
+print(paste0('Dataset contains ', nrow(gene_info),' rows with information from ',
+             length(unique(gene_info$GeneID)), ' genes'))
+
+kable(gene_info %>% head(20))
+```
+
+<br>
+
+# Merge gene2ensembl and gene_info
+
+<br>
+
+- It only contains information from 26200 genes so it won't match all of the gene expression entries (the Gene Expression datasets have 60K genes at the beginning)
+
+- There doesn't seem to have a 1:1 relation between Ensembl ID and gene
+
+```{r merge_datasets}
+gene_full_info = gene2ensembl %>% dplyr::select(c(2,which(!colnames(gene2ensembl) %in% colnames(gene_info)))) %>% 
+                 left_join(gene_info, by='GeneID') %>% dplyr::select(Ensembl_gene_identifier, Symbol, type_of_gene) %>%
+                 distinct(Ensembl_gene_identifier, Symbol, type_of_gene)
+
+print(paste0('Dataset contains ', nrow(gene_full_info), ' rows with information from ',
+             length(unique(gene_full_info$Ensembl_gene_identifier)), ' different Ensembl IDs belonging to ',
+             length(unique(gene_full_info$Symbol)), ' genes'))
+```
+
+<br>
+
+Almost all genes are labelled as protein-coding
+```{r}
+sort(table(gene_full_info$type_of_gene), decreasing = TRUE)
+```
+<br>
+
+Gene with 'unknown' biotype
+```{r}
+kable(gene_full_info[gene_full_info$type_of_gene=='unknown',])
+```
+
+There are some Ensembl IDs that are assigned to more than one gene!
+```{r dup_ensembl_ids}
+dup_ensembl_ids = gene_full_info$Ensembl_gene_identifier[duplicated(gene_full_info$Ensembl_gene_identifier)]
+print(paste0('There are ', length(dup_ensembl_ids), ' duplicated Ensembl IDs'))
+kable(gene_full_info[gene_full_info$Ensembl_gene_identifier %in% dup_ensembl_ids,] %>% arrange(Ensembl_gene_identifier))
+```
+<br>
+
+And some genes that are assigned to more than one Ensembl ID!
+
+- When looking for the Ensembl IDs in the web version of ensembl, some are mapped to different genes: ENSG00000268861 -> AC008878.3, ENSG00000226266 -> AC009961.1, AC093827.5 -> AC093827.5, ENSG00000285162 -> AC004593.2, ENSG00000261832 -> AC138894.1
+
+```{r dup_genes}
+dup_gene = gene_full_info$Symbol[duplicated(gene_full_info$Symbol)]
+print(paste0('There are ', length(dup_gene), ' duplicated genes'))
+kable(gene_full_info[gene_full_info$Symbol %in% dup_gene,] %>% arrange(Symbol))
+```
+
+Hopefully none of these things will cause problems when combining it with the gene expression datasets ...
+
+# Write .csv file
+```{r write_csv}
+write.csv(gene_full_info, file='../Data/gene_biotype_info.csv', row.names = FALSE)
+```

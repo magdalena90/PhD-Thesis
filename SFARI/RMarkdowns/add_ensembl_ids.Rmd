@@ -1,0 +1,175 @@
+---
+title: 'Data preprocessing'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+```{r load_packages, echo=TRUE, include=FALSE}
+library(tidyverse)
+library(biomaRt)
+library(knitr)
+library(expss)
+library(knitr)
+```
+
+<br>
+
+### Load SFARI file and add BioMart information
+
+<br>
+
+**Note:** I was originally using the ensembl archive from feb2014 to get the Ensembl IDs because that's the version used for Gandal's dataset and I was trying to get as many matches as possible, but I think this was returning me outdated information (gene_biotype) for some of the genes, so now, I'm going to:
+
+1. Query with the current version of BioMart
+
+2. Query with the feb2014 archive version to complement the Ensembl IDs that are no longer present in the new version (using only the current version, 9 genes cannot be matched to the Gandal dataset, when with the 2014 version only one was missing)
+
+```{r load_and_annotate_data, message=FALSE, warning=FALSE}
+# Load SFARI database
+SFARI_genes = read_csv('./../Data/SFARI_genes_01-03-2020.csv')
+
+# Add Ensembl IDs
+
+# Query current version of BioMart
+getinfo = c('hgnc_symbol','ensembl_gene_id','gene_biotype')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl')
+datGenes_now = getBM(attributes=getinfo, filters='hgnc_symbol', values=SFARI_genes$`gene-symbol`, mart=mart)
+
+# Query feb2014  archive
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl', host='feb2014.archive.ensembl.org') ## Gencode v19
+datGenes_2014 = getBM(attributes=getinfo, filters='hgnc_symbol', values=SFARI_genes$`gene-symbol`, mart=mart)
+datGenes_2014 = datGenes_2014 %>% filter(!ensembl_gene_id %in% datGenes_now$ensembl_gene_id)
+
+# Merge results
+datGenes = rbind(datGenes_now, datGenes_2014) %>% data.frame %>% arrange(hgnc_symbol)
+
+# Merge SFARI_genes with Ensembl IDs
+SFARI_genes = SFARI_genes %>% left_join(datGenes, by=c('gene-symbol'='hgnc_symbol')) %>% mutate(ID = ensembl_gene_id)
+
+rm(getinfo, mart, datGenes_now, datGenes_2014)
+```
+
+<br>
+
+### Improving BioMart results
+
+<br>
+
+1. The feb2014 archive version includes some IDs of the form 'LRG_n'
+```{r LRG_IDs}
+SFARI_genes$ensembl_gene_id[grepl('LRG_', SFARI_genes$ensembl_gene_id)]
+```
+
+These always have an alternative regular Ensembl ID, so we can just filter them out of the dataset without losing information
+```{r}
+SFARI_genes = SFARI_genes %>% filter(!grepl('LRG_',ensembl_gene_id))
+```
+
+<br>
+
+2. Genes that didn't get a match (only 3 in common with the previous BioMart version)
+```{r}
+print(paste0(sum(is.na(SFARI_genes$ID)),' Genes didn\'t return any matches: ', 
+             paste(sort(SFARI_genes$`gene-symbol`[is.na(SFARI_genes$ID)]), collapse=', ')))
+```
+
+If you look for their EnsemblID on Google two of them do come up (maybe it's something about the version of the BioMart I'm querying), so I'm going to annotate them manually
+```{r manually_annotate_missing_genes}
+# Manually assign Ensembl IDs to the 15 genes
+SFARI_genes = SFARI_genes %>% mutate(ID = case_when(`gene-symbol`=='MSNP1AS'        ~ 'ENSG00000251593',
+                                                    `gene-symbol`=='RP11-1407O15.2' ~ 'ENSG00000174093',
+                                                     TRUE ~ ID),
+                                     gene_biotype = case_when(`gene-symbol`=='MSNP1AS'        ~ 'processed_pseudogene', 
+                                                              `gene-symbol`=='RP11-1407O15.2' ~ 'protein_coding',
+                                                               TRUE ~ gene_biotype))
+
+# Check that all entries are complete
+print(paste0(sum(is.na(SFARI_genes$gene_biotype)),' SFARI gene(s) didn\'t make a match in bioMart: ',
+      paste(SFARI_genes$`gene-symbol`[is.na(SFARI_genes$gene_biotype)], collapse = ', ')))
+```
+
+<br>
+
+### Multiple Ensembl IDs for one gene
+
+<br>
+
+The relation between Ensembl IDs and genes should be 1:1, which is not the case here
+```{r}
+print(paste0('There are ', length(unique(SFARI_genes$ID)), ' unique Ensembl IDs and ',
+             length(unique(SFARI_genes$`gene-symbol`)),' unique gene symbols'))
+```
+
+<br>
+
+All genes with more than one Ensembl ID assigned to them:
+
+- For genes with two Ensembl IDs:
+
+  - The smaller Ensembl ID (not starting with 2) is current and the larger one (starting with 2) is an older version for genes *ACTN4, ADORA3, APBA2, ARGHEF10, ARGGAP11B, ATXN7, CC2D1A, CLN8, CLSTN3, CNTNAP2, DEAF1, DNAH10, EPHB6, FAN1, HRAS*
+  
+  - In the previous version with the archive BioMart search, the larger Ensembl ID was current and the smaller one was an older ID for gene *EPPK1* (both IDs start with 2, so maybe it had something to do with that)
+  
+  - Both entries are current for genes *AFF2, AGTR, APH1A, ARHGEF9, ATP1A3, ATRX*
+  
+  - None of the entries are current for genes *CYFIB1, GGNBP2*
+
+<br>
+
+- For genes with more than two Ensembl IDs:
+
+  - For *C4B*, all the Ensembl IDs are current, but all map to protein coding genes except for the 2nd one, which is a lncRNA. I think that they map to different "subtypes" of C4B, like C4B-202, C4B-217, C4B-201, and C4B-212
+  
+  - For HLA-A and HLA-B all the Ensembl IDs are current, I think they map to different subtypes of the gene, as above, but this time they all share the same gene_biotype
+  
+  - For *CNOT3* and *DLGAP2* only the first Ensembl ID was a current one, all the ones starting with 2 were old
+  
+<br>  
+  
+In conclusion, most of the times a duplicated Ensembl ID corresponds to an older Ensembl version, although not always, sometimes they map to different "versions" of the gene. I think it's not that bad because when crossing them with the Expression datasets, all the duplicates will disappear and this way we maximise the number of matches between datasets.
+
+```{r genes_with_multiple_ensembl_ids}
+duplicated_genes = SFARI_genes$`gene-symbol`[duplicated(SFARI_genes$`gene-symbol`)]
+
+print(paste0('There are ', length(duplicated_genes), ' genes with multiple Ensembl IDs'))
+
+SFARI_genes %>% dplyr::select(ID, `gene-symbol`, `gene-score`, syndromic, gene_biotype) %>% 
+      filter(`gene-symbol` %in% duplicated_genes) %>% arrange(`gene-symbol`, ID) %>% kable# %>% kable_styling
+```
+
+<br>
+
+### Gene Biotype
+
+<br>
+
+[Here](https://www.ensembl.org/info/genome/genebuild/biotypes.html) is the list of Ensembl Biotypes
+```{r gene_biotypes}
+table_info = SFARI_genes %>% apply_labels(gene_biotype = 'Gene Biotype')
+cro(table_info$gene_biotype)
+rm(table_info)
+```
+
+In the archive version of BioMart there's a biotype called processed transcript which in the newer version sometimes was labelled as protein_coding. The only two remaining occurrences of this have a new Ensembl ID with them, so we just have to be careful when labelling the transcriptomic data to update the gene_biotype to the newest version to avoid this
+
+```{r processed_transcript_biotype}
+processed_transcripts = SFARI_genes$`gene-symbol`[SFARI_genes$gene_biotype=='processed_transcript']
+SFARI_genes %>% filter(`gene-symbol` %in% processed_transcripts) %>% 
+                dplyr::select(ID, `gene-symbol`, `gene-score`, syndromic, gene_biotype)
+```
+<br>
+
+### Write results to .csv file
+```{r write_to_file}
+write.csv(SFARI_genes, './../Data/SFARI_genes_01-03-2020_w_ensembl_IDs.csv', row.names=FALSE)
+```
+<br><br>
+
+---
+
+#### Session info
+```{r print_session_info}
+sessionInfo()
+```
+<br><br>
