@@ -1,0 +1,526 @@
+---
+title: '2.3 Exploratory and Differential Expression Analyses'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+<br>
+
+#### Load R packages
+
+```{r load_packages, warning=FALSE, message=FALSE}
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(plotlyutils)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally) ; library(ggpubr)
+library(Rtsne)
+library(rstatix)
+library(expss)
+library(ClusterR)
+library(DESeq2) ; library(biomaRt)
+library(knitr)
+```
+
+#### Load preprocessed dataset (code in 2.1.Preprocessing_pipeline.Rmd)
+
+```{r load_dataset, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Load Gandal dataset
+load('./../Data/preprocessedData/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+
+```
+<br>
+
+------
+
+<br>
+
+## 2.3.1 Exploratory analysis
+<br>
+
+### Distribution of sample features by diagnosis
+<br>
+
+Diagnosis and brain region seem to be balanced except for the frontal lobe, where there are more control samples than ASD ones
+```{r}
+table_info = datMeta %>% apply_labels(Diagnosis = 'Diagnosis', Brain_lobe = 'Brain Lobe', 
+                                      Batch = 'Batch', Sex = 'Gender')
+
+cro(table_info$Diagnosis, list(table_info$Brain_lobe,total()))
+```
+<br>
+
+There are many more Male than Female samples, but Diagnosis and Gender seem to be balanced
+```{r}
+cro(table_info$Diagnosis, list(table_info$Sex, total()))
+```
+<br>
+
+The difference in age between diagnosis groups is not statistically significant. The box plots look different between them but its probably because they have very few points each (35 and 45), so they are a bit noisy, looking at the individual points it seems like the main difference could be a few very young samples in the ASD group.
+```{r warning=FALSE, message=FALSE, fig.align='center'}
+
+datMeta %>% ggplot(aes(Diagnosis, Age, fill = Diagnosis)) + geom_boxplot() + 
+            geom_jitter(color='gray', size=2, alpha = 0.5) +
+            stat_compare_means(label = 'p.signif', method = 't.test', method.args = list(var.equal = FALSE)) + 
+            theme_minimal() + theme(legend.position = 'none')
+
+```
+<br><br>
+
+### Visualisations of the samples
+<br>
+
+#### PCA plots
+<br>
+
+The first principal component separates the samples by diagnosis groups perfectly, there is no recognisable pattern in the samples coloured by brain lobe
+
+```{r, fig.width=10}
+
+pca = datExpr %>% t %>% prcomp
+
+plot_data = pca$x %>% data.frame %>% dplyr::select(PC1:PC2) %>% 
+            mutate('ID'= datExpr %>% colnames %>% substring(2)) %>% 
+            left_join(datMeta, by=c('ID'='Dissected_Sample_ID')) %>% 
+            dplyr::select('ID','PC1','PC2','Diagnosis','Brain_lobe') %>% 
+            mutate('Diagnosis' = factor(Diagnosis, levels=c('CTL','ASD')))
+
+p1 = plot_data %>% ggplot(aes(PC1, PC2, color=Diagnosis, shape=Diagnosis)) + geom_point(alpha = 0.8) +
+              xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1],1),'%)')) +
+              ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2],1),'%)')) +
+              ggtitle('Samples coloured by Diagnosis') + coord_fixed() + theme_minimal()
+
+p2 = plot_data %>% ggplot(aes(PC1, PC2, color=Brain_lobe, shape=Brain_lobe)) + geom_point(alpha = 0.8) +
+              xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1],1),'%)')) +
+              ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2],1),'%)')) +
+              ggtitle('Samples coloured by Brain Lobe') + coord_fixed() + labs(color = 'Brain Lobe', shape = 'Brain Lobe') + 
+              theme_minimal()
+
+grid.arrange(p1, p2, nrow = 1)
+
+rm(pca, p1, p2)
+```
+<br>
+
+#### t-SNE plots
+<br>
+
+No matter the value of the perplexity parameter, Diagnosis is always an important factor in the way samples are positioned
+
+```{r, fig.width=10, fig.height=10, fig.align='center'}
+
+perplexities = c(2,5,10,20)
+ps = list()
+
+for(i in 1:length(perplexities)){
+  set.seed(123)
+  tsne = datExpr %>% t %>% Rtsne(perplexity=perplexities[i])
+  plot_data = data.frame('ID'=colnames(datExpr), 'C1'=tsne$Y[,1], 'C2'=tsne$Y[,2]) %>%
+              mutate('ID'=substring(ID,2)) %>% left_join(datMeta, by=c('ID'='Dissected_Sample_ID')) %>%
+              dplyr::select('C1','C2','Diagnosis','Subject_ID') %>%
+              mutate('Diagnosis'=factor(Diagnosis, levels=c('CTL','ASD')))
+  ps[[i]] = plot_data %>% ggplot(aes(C1, C2, color=Diagnosis, shape=Diagnosis)) + geom_point(alpha = 0.7) + theme_minimal() +
+            ggtitle(paste0('Perplexity = ',perplexities[i])) + theme(legend.position='none') + coord_fixed()
+}
+
+grid.arrange(grobs=ps, nrow=2)
+
+```
+
+No matter the value of the perplexity parameter, brain lobe doesn't seem to play any role in the way the points are positioned
+
+```{r, fig.width=10, fig.height=10, fig.align='center'}
+
+perplexities = c(2,5,10,20)
+ps = list()
+
+for(i in 1:length(perplexities)){
+  set.seed(123)
+  tsne = datExpr %>% t %>% Rtsne(perplexity=perplexities[i])
+  plot_data = data.frame('ID'=colnames(datExpr), 'C1'=tsne$Y[,1], 'C2'=tsne$Y[,2]) %>%
+              mutate('ID'=substring(ID,2)) %>% left_join(datMeta, by=c('ID'='Dissected_Sample_ID')) %>%
+              dplyr::select('C1','C2','Brain_lobe','Subject_ID')
+  ps[[i]] = plot_data %>% ggplot(aes(C1, C2, color=Brain_lobe, shape=Brain_lobe)) + geom_point(alpha = 0.7) + theme_minimal() +
+            ggtitle(paste0('Perplexity = ',perplexities[i])) + theme(legend.position='none') + coord_fixed()
+}
+
+grid.arrange(grobs=ps, nrow=2)
+
+```
+<br>
+
+As we saw above, the big clusters of points generally correspond to diagnosis groups, but we can see there are smaller clusters of two or three points. When we colour the samples by diagnosis we can see these small clusters correspond to the different samples extracted from the same subject.
+
+```{r, fig.width=10, fig.height=10, fig.align='center'}
+
+perplexities = c(2,5,10,20)
+ps = list()
+
+for(i in 1:length(perplexities)){
+  set.seed(123)
+  tsne = datExpr %>% t %>% Rtsne(perplexity=perplexities[i])
+  plot_data = data.frame('ID'=colnames(datExpr), 'C1'=tsne$Y[,1], 'C2'=tsne$Y[,2]) %>%
+              mutate('ID'=substring(ID,2)) %>% left_join(datMeta, by=c('ID'='Dissected_Sample_ID')) %>%
+              dplyr::select('C1','C2','Brain_lobe','Subject_ID')
+  ps[[i]] = plot_data %>% ggplot(aes(C1, C2, color=Subject_ID)) + geom_point(alpha = 0.6) + theme_minimal() +
+            ggtitle(paste0('Perplexity = ',perplexities[i])) + theme(legend.position='none') + coord_fixed()
+}
+
+grid.arrange(grobs=ps, nrow=2)
+
+```
+<br>
+
+Interactive version of the last plot above so we can corroborate the subject ID's from each sample (because having so many different subject IDs, subjects assigned similar colours may be confused)
+
+```{r warning=FALSE, message=FALSE, fig.align='center'}
+
+ggplotly(plot_data %>% ggplot(aes(C1, C2, color=Subject_ID)) + geom_point(aes(id=Subject_ID)) + theme_minimal() + 
+         theme(legend.position='none') + ggtitle('t-SNE Perplexity = 20 coloured by Subject ID'))
+
+```
+<br><br>
+
+### Visualisations of the genes
+<br>
+
+#### PCA Plot
+<br>
+
+The first principal component explains over 99% of the variance in the dataset and is strongly related to the mean level of expression of the genes
+
+```{r fig.width=10}
+
+pca = datExpr %>% prcomp
+
+plot_data = data.frame( 'PC1' = pca$x[,1], 'PC2' = pca$x[,2], 'MeanExpr'=rowMeans(datExpr))
+
+plot_data %>% ggplot(aes(PC1, PC2, color=MeanExpr)) + geom_point(alpha=0.3) + theme_minimal() + 
+              scale_color_viridis() + ggtitle('PCA') + coord_fixed() +
+              xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1],1),'%)')) +
+              ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2],1),'%)')) + 
+              theme(legend.position = 'bottom', legend.key.width=unit(3, 'cm')) + labs(color='Mean Expression ')
+
+```
+<br>
+
+#### t-SNE
+<br>
+
+Independently of the perplexity parameter, the mean level of expression of the genes seems to continue to be the main feature that characterises the genes
+
+```{r fig.width=10, fig.height=6}
+
+perplexities = c(1,2,5,10,50,100)
+ps = list()
+
+for(i in 1:length(perplexities)){
+  
+  file_name = paste0('./../Data/Results/tsne_perplexity_',perplexities[i],'.csv')
+  
+  # Check if file with t-sne coordinates already exists, if not, calculate coordinates
+  if(file.exists(file_name)){
+    tsne = read.csv(file_name)
+  } else {
+    set.seed(123)
+    tsne = datExpr %>% Rtsne(perplexity=perplexities[i])
+    tsne_coords = cbind(tsne$Y, rownames(datExpr))
+    colnames(tsne_coords) = c('C1','C2','ID')
+    write.csv(tsne_coords, file_name, row.names=F)
+    tsne = tsne_coords
+  }
+  
+  # Plot results
+  plot_data = data.frame('C1'=tsne[,1], 'C2'=tsne[,2], 'MeanExpr'=rowMeans(datExpr))
+  ps[[i]] = plot_data %>% ggplot(aes(C1, C2, color=MeanExpr)) + geom_point(alpha=0.5) + theme_minimal() + coord_fixed() +
+            scale_color_viridis() + ggtitle(paste0('Perplexity = ', perplexities[i])) + theme(legend.position='none')
+}
+
+grid.arrange(grobs=ps, nrow=2)
+
+```
+<br><br>
+
+### Mean level of expression
+<br>
+
+Samples belonging to the ASD group have statistically significantly higher levels of expression than the Control group (this was unexpected)
+
+```{r fig.align='center'}
+
+plot_data = data.frame('ID'=colnames(datExpr), 'Mean'=colMeans(datExpr)) %>% 
+            mutate('ID'=substring(ID,2)) %>% left_join(datMeta, by=c('ID'='Dissected_Sample_ID'))
+
+plot_data %>% ggplot(aes(Diagnosis, Mean, fill = Diagnosis)) + 
+              geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) + 
+              stat_compare_means(label = 'p.signif', method = 't.test', method.args = list(var.equal = FALSE)) + 
+              ylab('Mean Expression') + theme_minimal() + theme(legend.position = 'none')
+
+```
+<br>
+
+Samples extracted from the frontal lobe have a slightly lower mean level of expression than the samples from the other lobes, but this difference is not statistically significant
+
+```{r, fig.align='center'}
+
+wt = plot_data %>% wilcox_test(Mean~Brain_lobe, p.adjust.method='BH') %>% add_x_position(x = 'group')
+increase = .006
+base = 8.175
+pos_y_comparisons = c(base, base+increase, base+3*increase, base, base+2*increase, base)
+
+p1 = plot_data %>% ggplot(aes(Brain_lobe, Mean)) + 
+              geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3, aes(fill = Brain_lobe)) + 
+              stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .02) +
+              xlab('Brain Lobe') + ylab('Mean Expression') + theme(legend.position = 'none') + 
+              theme_minimal() + theme(legend.position = 'none')
+
+
+p2 = plot_data %>% mutate(frontal_lobe = ifelse(Brain_lobe == 'Frontal', 'Frontal Lobe', 'Other lobes')) %>%
+              ggplot(aes(frontal_lobe, Mean, fill = frontal_lobe)) + 
+              geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) + 
+              stat_compare_means(label = 'p.signif', method = 't.test', method.args = list(var.equal = FALSE)) + 
+              xlab('Brain Lobe') + ylab('Mean Expression') + theme(legend.position = 'none') + 
+              theme_minimal() + theme(legend.position = 'none')
+
+grid.arrange(p1, p2, nrow=1, widths = c(0.6,0.4))
+
+```
+
+<br>
+
+------
+
+<br>
+
+## 2.3.2 Differential Expression Analysis
+<br>
+
+### Log fold change threshold
+<br>
+
+There are `r sum(genes_info$padj<0.05)` DE genes using a threshold of LFC=0 (~`r round(mean(genes_info$padj<0.05)*100)`% of the total number of genes). As the threshold increases, the number of DE genes quickly decreases.
+
+```{r changing_lfc_treshold, fig.width=10, warning=FALSE, message=FALSE}
+
+lfc_list = seq(0, 0.3, 0.01)
+
+n_genes = nrow(datExpr)
+
+# PCA
+datExpr_pca_samps = datExpr %>% data.frame %>% t %>% prcomp
+
+# Initialise data frame to save PCA outputs
+pcas_samps = datExpr_pca_samps$x %>% data.frame %>% dplyr::select(PC1:PC2) %>% 
+             mutate('ID'=colnames(datExpr), 'lfc'=-1, PC1=scale(PC1), PC2=scale(PC2))
+
+pca_samps_old = pcas_samps
+
+for(lfc in lfc_list){
+  
+  # Recalculate DE_info with the new threshold (p-values change) an filter DE genes
+  DE_genes = results(dds, lfcThreshold=lfc, altHypothesis='greaterAbs') %>% data.frame %>%
+             mutate('ID'=rownames(.)) %>% filter(padj<0.05)
+  
+  datExpr_DE = datExpr %>% data.frame %>% filter(rownames(.) %in% DE_genes$ID)
+  n_genes = c(n_genes, nrow(DE_genes))
+  
+  # Calculate PCAs
+  datExpr_pca_samps = datExpr_DE %>% t %>% prcomp
+
+  # Create new DF entries
+  pca_samps_new = datExpr_pca_samps$x %>% data.frame %>% dplyr::select(PC1:PC2) %>% 
+                  mutate('ID'=colnames(datExpr), 'lfc'=lfc, PC1=scale(PC1), PC2=scale(PC2))
+  
+  # Change PC sign if necessary
+  if(cor(pca_samps_new$PC1, pca_samps_old$PC1)<0) pca_samps_new$PC1 = -pca_samps_new$PC1
+  if(cor(pca_samps_new$PC2, pca_samps_old$PC2)<0) pca_samps_new$PC2 = -pca_samps_new$PC2
+  
+  pca_samps_old = pca_samps_new
+  
+  # Update DFs
+  pcas_samps = rbind(pcas_samps, pca_samps_new)
+  
+}
+
+# Add Diagnosis information
+pcas_samps = pcas_samps %>% mutate('ID'=substring(ID,2)) %>% 
+             left_join(datMeta, by=c('ID'='Dissected_Sample_ID')) %>%
+             dplyr::select(ID, PC1, PC2, lfc, Diagnosis)
+
+# Plot change of number of genes
+ggplotly(data.frame('lfc'=lfc_list, 'n_genes'=n_genes[-1]) %>% ggplot(aes(x=lfc, y=n_genes)) + 
+         geom_point() + geom_line() + theme_minimal() + xlab('Log Fold Change Magnitude') + ylab('DE Genes') +
+         ggtitle('Number of Differentially Expressed genes when modifying filtering threshold'))
+
+rm(lfc_list, n_genes, lfc, pca_samps_new, pca_samps_old, datExpr_pca_samps)
+```
+<br><br>
+
+### Set of differentially expressed genes
+<br>
+
+#### Volcano plot
+
+```{r warning=FALSE, fig.align='center'}
+library(ggrepel)
+
+ggplotly(genes_info %>% mutate(gene_name = datGenes$hgnc_symbol) %>%
+        ggplot(aes(shrunken_log2FoldChange, padj, color=significant)) + 
+        geom_point(alpha=0.2, aes(id = gene_name)) + scale_y_sqrt() +
+        xlab('LFC') + ylab('Adjusted p-value') + theme_minimal() + labs(color = 'DE')) #+
+               #geom_label_repel(aes(label=ifelse(shrunken_log2FoldChange>0.5 | shrunken_log2FoldChange< -0.39, 
+               #                                  as.character(gene_name),'')), direction = 'y', nudge_y = 0.01)
+```
+<br>
+
+Most of the genes on this list are overexpressed in ASD and do not have a Neuronal tag
+
+```{r}
+top_genes = genes_info %>% mutate(Gene = datGenes$hgnc_symbol) %>% filter(significant == TRUE) %>%
+            arrange(-abs(shrunken_log2FoldChange)) %>% top_n(25, wt=abs(shrunken_log2FoldChange)) %>%
+            mutate(Neuronal = as.logical(Neuronal), LFC = shrunken_log2FoldChange, n = 1:25)
+
+kable(top_genes %>% dplyr::select(n, Gene, LFC, padj, Neuronal), caption = 'Top 25 DE genes ordered by LFC magnitude')
+```
+<br>
+
+#### PCA plot of samples
+
+PCA plot of genes characterised by each LFC threshold's corresponding set of DE genes. 
+
+- The frame corresponding to LFC = -1 doesn't correspond to any LFC, all of the genes in the dataset were used to create this plot
+
+- LFC thresholds from 0 to 0.1 seem to separate the samples by diagnosis better than the rest
+
+- LFC thresholds above 0.2 aren't able to separate the samples by diagnosis any more
+
+- The PC values for each LFC were scaled so they were easier to compare (without this scale, as the LFC increases, the points begin to cluster more and more tightly at the centre of the plot)
+
+```{r, warning=FALSE}
+ggplotly(pcas_samps %>% mutate(abs_lfc=ifelse(lfc==-1,-1,lfc)) %>% 
+         ggplot(aes(PC1, PC2, color=Diagnosis, shape=Diagnosis)) + 
+         geom_point(aes(frame=abs_lfc, ids=ID), alpha=0.7) + coord_fixed() +
+         theme_minimal() + ggtitle('PCA plot of samples modifying filtering threshold'))
+
+# # Figure for thesis:
+# p1 = pcas_samps %>% filter(lfc == 0) %>% ggplot(aes(PC1, PC2, color=Diagnosis, shape=Diagnosis)) + 
+#      geom_point(alpha=0.7) + theme_minimal() + ggtitle('LFC = 0') + theme(legend.position = 'none') + coord_fixed()
+# p2 = pcas_samps %>% filter(lfc == 0.1) %>% ggplot(aes(PC1, PC2, color=Diagnosis, shape=Diagnosis)) + 
+#      geom_point(alpha=0.7) + theme_minimal() + ggtitle('LFC = 0.1') + theme(legend.position = 'none') + coord_fixed()
+# p3 = pcas_samps %>% filter(lfc == 0.2) %>% ggplot(aes(PC1, PC2, color=Diagnosis, shape=Diagnosis)) + 
+#      geom_point(alpha=0.7) + theme_minimal() + ggtitle('LFC = 0.2') + theme(legend.position = 'none') + coord_fixed()
+# p4 = pcas_samps %>% filter(lfc == 0.3) %>% ggplot(aes(PC1, PC2, color=Diagnosis, shape=Diagnosis)) + 
+#      geom_point(alpha=0.7) + theme_minimal() + ggtitle('LFC = 0.3') + coord_fixed()
+# ggarrange(p1,p2,p3,p4, nrow=1, common.legend = TRUE, legend='bottom', widths = c(0.22, 0.25, 0.28, 0.24))
+```
+<br>
+
+PCA plot of samples characterised by all of the genes vs characterised only by the genes found to be differentially expressed (this plot is just a side-by-side comparison of two frames from the plot above)
+
+```{r fig.width=10, fig.align='center'}
+
+pca = datExpr %>% t %>% prcomp
+
+plot_data = pca$x %>% data.frame %>% dplyr::select(PC1:PC2) %>% 
+            mutate('ID'= datExpr %>% colnames %>% substring(2)) %>% 
+            left_join(datMeta, by=c('ID'='Dissected_Sample_ID')) %>% 
+            dplyr::select('ID','PC1','PC2','Diagnosis') %>% 
+            mutate('Diagnosis' = factor(Diagnosis, levels=c('CTL','ASD')))
+
+p1 = plot_data %>% ggplot(aes(PC1, PC2, color=Diagnosis, shape=Diagnosis)) + geom_point(alpha = 0.8) +
+              xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1],1),'%)')) +
+              ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2],1),'%)')) +
+              ggtitle('Characterising samples with all genes') +
+              coord_fixed() + theme_minimal() + theme(legend.position = 'none')
+
+
+pca = datExpr[genes_info$significant==TRUE,] %>% t %>% prcomp
+
+plot_data = pca$x %>% data.frame %>% dplyr::select(PC1:PC2) %>% 
+            mutate('ID'= datExpr %>% colnames %>% substring(2)) %>% 
+            left_join(datMeta, by=c('ID'='Dissected_Sample_ID')) %>% 
+            dplyr::select('ID','PC1','PC2','Diagnosis') %>% 
+            mutate('Diagnosis' = factor(Diagnosis, levels=c('CTL','ASD')))
+
+p2 = plot_data %>% ggplot(aes(PC1, PC2, color=Diagnosis, shape=Diagnosis)) + geom_point(alpha = 0.8) +
+              xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1],1),'%)')) +
+              ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2],1),'%)')) +
+              ggtitle('Characterising samples with DE genes') +
+              coord_fixed() + theme_minimal()
+
+ggarrange(p1,p2, nrow=1, common.legend = TRUE, legend='bottom')
+
+rm(p1, p2, pca, plot_data)
+```
+<br>
+
+#### PCA plot of genes coloured by their LFC
+<br>
+
+The second principal component is strongly related to the LFC of the genes and when visualising only the differentially expressed genes, they form two clouds of points, one with the overexpressed genes and another with the underexpressed genes.
+
+```{r fig.width=10, fig.align='center'}
+
+# All genes
+pca = datExpr %>% prcomp
+
+plot_data = genes_info %>% mutate(PC1 = pca$x[,1], PC2 = pca$x[,2])
+
+pos_zero = -min(plot_data$shrunken_log2FoldChange)/(max(plot_data$shrunken_log2FoldChange)-min(plot_data$shrunken_log2FoldChange))
+p1 = plot_data %>% ggplot(aes(PC1, PC2, color=shrunken_log2FoldChange)) + geom_point(alpha=0.5) +
+    scale_color_gradientn(colours=c('#F8766D','#faa49e','white','#00BFC4','#009499'), 
+                          values=c(0, pos_zero-0.15, pos_zero, pos_zero+0.15, 1)) +
+    xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1],1),'%)')) +
+    ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2],1),'%)')) + 
+    theme_minimal() + ggtitle('PCA of all genes') + 
+    theme(legend.position = 'bottom', legend.key.width=unit(2,'cm')) + labs(color = 'LFC ')
+
+# Only DE genes
+pca = datExpr[genes_info$significant,] %>% prcomp
+
+plot_data = genes_info %>% dplyr::filter(significant == TRUE) %>% mutate(PC1 = pca$x[,1], PC2 = pca$x[,2])
+
+pos_zero = -min(plot_data$shrunken_log2FoldChange)/(max(plot_data$shrunken_log2FoldChange)-min(plot_data$shrunken_log2FoldChange))
+p2 = plot_data %>% ggplot(aes(PC1, PC2, color=shrunken_log2FoldChange)) + geom_point(alpha=0.5) +
+    scale_color_gradientn(colours=c('#F8766D','#faa49e','white','#00BFC4','#009499'), 
+                          values=c(0, pos_zero-0.15, pos_zero, pos_zero+0.15, 1)) +
+    xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1],1),'%)')) +
+    ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2],1),'%)')) + 
+    theme_minimal() + ggtitle('PCA of differentially expressed genes') + 
+    theme(legend.position = 'bottom', legend.key.width=unit(2,'cm')) + labs(color = 'LFC ')
+
+ggarrange(p1,p2, nrow=1, common.legend = TRUE, legend='bottom')
+
+rm(pca, plot_data, pos_zero, p1, p2)
+```
+<br>
+
+#### Level of expression comparison between over and underexpressed genes
+<br>
+
+The difference in mean level of expression between over and underexpressed genes is statistically significant with a p=value lower than $10^{-4}$
+
+```{r, fig.align='center'}
+
+plot_data = data.frame('MeanExpr' = rowMeans(datExpr), 
+                       'Group' = ifelse(genes_info$shrunken_log2FoldChange>0,'overexpressed','underexpressed')) %>%
+            mutate(Group = factor(Group, levels = c('underexpressed','overexpressed')))
+
+plot_data[genes_info$significant==TRUE,] %>% ggplot(aes(Group, MeanExpr, fill = Group)) + 
+              geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) + 
+              stat_compare_means(label = 'p.signif', method = 't.test', method.args = list(var.equal = FALSE)) + 
+              ylab('Mean Expression') + xlab('') + theme(legend.position = 'none') + 
+              theme_minimal() + theme(legend.position = 'none')
+
+```
+<br>
+
+---
+
+#### Session info
+
+```{r}
+sessionInfo()
+```
+<br><br>
+
