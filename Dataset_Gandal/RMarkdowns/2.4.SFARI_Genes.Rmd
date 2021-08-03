@@ -48,7 +48,7 @@ SFARI_colour_hue = function(r) {
 
 <br>
 
-There are `r sum(SFARI_genes$ID %in% rownames(datExpr))` SFARI Genes in the expression dataset (~`r round(100*mean(SFARI_genes$ID %in% rownames(datExpr)))`%), `r sum(!genes_info[['gene-score']] %in% c('None','Others'))` of them have a SFARI Gene Score.
+There are `r sum(SFARI_genes$ID %in% rownames(datExpr))` SFARI Genes in the expression dataset (~`r round(100*mean(SFARI_genes$ID %in% rownames(datExpr)))`%), `r sum(genes_info[['gene-score']] %in% c('1','2','3'))` of them have a SFARI Gene Score.
 
 Gene count by SFARI score:
 ```{r}

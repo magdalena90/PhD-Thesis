@@ -1,0 +1,413 @@
+---
+title: '2.4 SFARI Genes'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+<br>
+
+#### Load R packages
+
+```{r load_packages, warning=FALSE, message=FALSE}
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(GGally) ; library(ggpubr)
+library(rstatix)
+library(expss)
+library(DESeq2)
+library(knitr) ; library(kableExtra)
+```
+
+#### Load preprocessed dataset (code in 2.1.Preprocessing_pipeline.Rmd)
+
+```{r load_dataset, echo=TRUE, message=FALSE, warning=FALSE}
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../SFARI/Data/SFARI_genes_01-03-2020_w_ensembl_IDs.csv')
+
+# Load Wright dataset
+load('./../Data/preprocessedData/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+
+# Updates genes_info with SFARI information
+genes_info = genes_info %>% left_join(SFARI_genes, by = 'ID') %>%
+             mutate(gene.score = ifelse(is.na(`gene-score`) & Neuronal==0, 'Others', 
+                                        ifelse(is.na(`gene-score`), 'Neuronal', `gene-score`))) %>%
+             mutate(Group = factor(ifelse(gene.score %in% c('Neuronal','Others'), gene.score, 'SFARI'), 
+                    levels = c('SFARI', 'Neuronal', 'Others')))
+
+# SFARI palette
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+
+```
+<br>
+
+------
+
+<br>
+
+There are `r sum(SFARI_genes$ID %in% rownames(datExpr))` SFARI Genes in the expression dataset (~`r round(100*mean(SFARI_genes$ID %in% rownames(datExpr)))`%), `r sum(genes_info[['gene.score']] %in% c('1','2','3'))` of them have a SFARI Gene Score.
+
+Gene count by SFARI score:
+```{r}
+table_info = genes_info %>% apply_labels(`gene-score` = 'SFARI Gene Score', syndromic = 'Syndromic Tag',
+                                          Neuronal = 'Neuronal Function', gene.score = 'Gene Score') %>%
+             mutate(syndromic = as.logical(syndromic), Neuronal = as.logical(Neuronal))
+
+cro(table_info$`gene-score`)
+```
+<br>
+
+Gene count by Syndromic tag:
+```{r}
+cro(table_info$syndromic)
+```
+<br>
+
+Neuronal annotations:
+
+<br>
+
+`r sum(genes_info$Neuronal)`  genes have neuronal-related annotations, `r sum(genes_info$gene.score %in% c('1','2','3') & genes_info$Neuronal)` of these, have a SFARI score
+
+```{r}
+cro(table_info$gene.score[genes_info$`gene-score` %in% as.character(c(1:3))],
+    list(table_info$Neuronal[genes_info$`gene-score` %in% as.character(c(1:3))], total()))
+
+rm(table_info)
+```
+<br>
+
+-----
+
+<br>
+
+## 2.4.1 Analysis of all SFARI Genes together
+<br>
+
+### Mean Expression
+
+```{r, fig.align='center'}
+
+plot_data = data.frame('ID'=rownames(datExpr), 'MeanExpr'=rowMeans(datExpr)) %>% 
+            left_join(genes_info, by='ID')
+
+wt = plot_data %>% wilcox_test(MeanExpr~Group, p.adjust.method='BH') %>% add_x_position(x = 'group')
+increase = 1.3
+base = 13
+pos_y_comparisons = c(base, base+increase, base)
+plot_data %>% ggplot(aes(Group, MeanExpr)) + 
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=Group)) + 
+     stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .03) +
+     scale_fill_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + 
+     xlab('') + ylab('Mean Expression') + ggtitle('Mean Expression Comparison') +
+     scale_x_discrete(labels=c('SFARI' = 'SFARI\nGenes', 'Others' = 'Other\ngenes',
+                              'Neuronal' = 'Neuronal\ngenes')) +
+     theme_minimal() + theme(legend.position='none')
+
+```
+
+### Log Fold Change
+
+The propotion of over and underexpressed genes is very simiar for each group, so we can just focus on the magnitude of the LFC independently of the sign.
+
+```{r, fig.align='center'}
+
+genes_info %>% mutate(direction = ifelse(log2FoldChange>0, 'overexpressed', 'underexpressed')) %>% 
+               group_by(Group, direction) %>% tally(name = 'overexpressed') %>% 
+               filter(direction == 'overexpressed') %>% ungroup %>% 
+               left_join(genes_info %>% group_by(Group) %>% tally(name = 'Total'), by = 'Group') %>% ungroup %>%
+               mutate('underexpressed' = Total - overexpressed , 
+                      'ratio' = round(overexpressed/underexpressed,2)) %>% 
+               dplyr::select(Group, overexpressed, underexpressed, ratio) %>% 
+               kable %>% kable_styling(full_width = F)
+
+```
+<br>
+
+```{r, fig.align='center'}
+
+plot_data = data.frame('ID'=rownames(datExpr), 'MeanExpr'=rowMeans(datExpr)) %>% 
+            left_join(genes_info, by='ID')
+
+wt = plot_data %>% filter(log2FoldChange>0) %>% 
+     wilcox_test(MeanExpr~Group, p.adjust.method='BH') %>% add_x_position(x = 'group')
+increase = 1.3
+base = 13
+pos_y_comparisons = c(base, base+increase, base)
+p1 = plot_data %>% filter(log2FoldChange>0) %>% ggplot(aes(Group, MeanExpr)) +
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=Group)) + 
+     stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .03) +
+     scale_fill_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + 
+     xlab('') + ylab('Mean Expression') + ggtitle('Overexpressed genes') +
+     scale_x_discrete(labels=c('SFARI' = 'SFARI\nGenes', 'Others' = 'Other\ngenes',
+                              'Neuronal' = 'Neuronal\ngenes')) +
+     theme_minimal() + theme(legend.position='none')
+
+wt = plot_data %>% filter(log2FoldChange<0) %>% 
+     wilcox_test(MeanExpr~Group, p.adjust.method='BH') %>% add_x_position(x = 'group')
+p2 = plot_data %>% filter(log2FoldChange<0) %>% ggplot(aes(Group, MeanExpr)) +
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=Group)) + 
+     stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .03) +
+     scale_fill_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + 
+     xlab('') + ylab('Mean Expression') + ggtitle('Underexpressed genes') +
+     scale_x_discrete(labels=c('SFARI' = 'SFARI\nGenes', 'Others' = 'Other\ngenes',
+                              'Neuronal' = 'Neuronal\ngenes')) +
+     theme_minimal() + theme(legend.position='none')
+
+grid.arrange(p1, p2, nrow=1)
+
+```
+
+<br>
+
+Both with the original LFC values as well as the shrunken ones, the difference in LFC magnitude between SFARI genes and non-SFARI, non-Neuronal genes is statisically significant with a p-value lower than $10^{-3}$, but the difference between SFARI and Neuronal genes is only statistically significant when comparing the original LFC magnitues.
+
+```{r fig.align='center'}
+
+wt = genes_info %>% mutate(abs_lfc = abs(log2FoldChange), 
+                           Group = factor(Group, levels = c('SFARI','Others', 'Neuronal'))) %>% 
+     wilcox_test(abs_lfc~Group, p.adjust.method='BH') %>% add_x_position(x = 'group')
+
+increase = 0.02
+base = 0.32
+pos_y_comparisons = c(base, base + increase, base)
+p1 = genes_info %>% mutate(Group = factor(Group, levels = c('SFARI','Others', 'Neuronal'))) %>% 
+     ggplot(aes(Group, abs(log2FoldChange))) + 
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=Group)) + 
+     stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .003) + 
+     scale_fill_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(7,8)))) + 
+     coord_cartesian(ylim= c(0, max(pos_y_comparisons))) + 
+     scale_x_discrete(labels=c('SFARI' = 'SFARI\nGenes', 'Others' = 'Other\ngenes',
+                              'Neuronal' = 'Neuronal\ngenes')) +
+     xlab('') + ylab('Original LFC Magnitude') + theme_minimal() + theme(legend.position='none')
+
+
+wt = genes_info %>% mutate(abs_lfc = abs(shrunken_log2FoldChange), 
+                           Group = factor(Group, levels = c('SFARI','Others', 'Neuronal'))) %>% 
+     wilcox_test(abs_lfc~Group, p.adjust.method='BH') %>% add_x_position(x = 'group')
+
+increase = 0.005
+base = 0.063
+pos_y_comparisons = c(base, base + increase, base)
+p2 = genes_info %>% mutate(Group = factor(Group, levels = c('SFARI','Others', 'Neuronal'))) %>% 
+     ggplot(aes(Group, abs(shrunken_log2FoldChange))) + 
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=Group)) + 
+     stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) + 
+     scale_fill_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(7,8)))) + 
+     coord_cartesian(ylim= c(0, max(pos_y_comparisons))) + 
+     scale_x_discrete(labels=c('SFARI' = 'SFARI\nGenes', 'Others' = 'Other\ngenes',
+                              'Neuronal' = 'Neuronal\ngenes')) +
+     xlab('') + ylab('Shrunken LFC Magnitude') + theme_minimal() + theme(legend.position='none')
+
+grid.arrange(p1, p2, nrow = 1)
+
+rm(increase, base, pos_y_comparisons, wt)
+```
+
+Full plots, without cropping out outliers
+
+```{r fig.align='center'}
+
+p1 = ggplotly(genes_info %>% mutate(Group = factor(Group, levels = c('SFARI','Others', 'Neuronal'))) %>% 
+     ggplot(aes(Group, abs(log2FoldChange))) + 
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=Group)) + 
+     scale_fill_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(7,8)))) + 
+     scale_x_discrete(labels=c('SFARI' = 'SFARI\nGenes', 'Others' = 'Other\ngenes',
+                              'Neuronal' = 'Neuronal\ngenes')) +
+     xlab('') + ylab('Original LFC Magnitude') + theme_minimal() + theme(legend.position='none'))
+  
+p2 = ggplotly(genes_info %>% mutate(Group = factor(Group, levels = c('SFARI','Others', 'Neuronal'))) %>% 
+     ggplot(aes(Group, abs(shrunken_log2FoldChange))) + 
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=Group)) + 
+     scale_fill_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(7,8)))) + 
+     scale_x_discrete(labels=c('SFARI' = 'SFARI\nGenes', 'Others' = 'Other\ngenes',
+                              'Neuronal' = 'Neuronal\ngenes')) +
+     xlab('') + ylab('Shrunken LFC Magnitude') + theme_minimal() + theme(legend.position='none'))
+  
+
+subplot(p1, p2, nrows = 1)
+
+```
+
+<br>
+
+### Differential Expression
+
+There are no DE genes in the SFARI group
+
+```{r}
+genes_info %>% group_by(Group, significant) %>% tally(name = 'DE') %>% filter(significant) %>% ungroup %>%
+               left_join(genes_info %>% group_by(Group) %>% tally(name = 'Total'), by = 'Group') %>% ungroup %>%
+               mutate('prop_DE' = round(DE/Total,2)) %>% dplyr::select(Group, DE, prop_DE, Total) %>% 
+               kable(caption = 'Proportion of DE Genes by Group') %>% kable_styling(full_width = F)
+```
+<br>
+
+-----
+
+<br>
+
+## 2.4.2 Analysis of SFARI Genes by SFARI Score
+<br>
+
+### Mean Expression
+
+```{r fig.align='center'}
+
+plot_data = data.frame('ID'=rownames(datExpr), 'MeanExpr'=rowMeans(datExpr)) %>% left_join(genes_info, by='ID')
+
+wt = plot_data %>% wilcox_test(MeanExpr~gene.score, p.adjust.method='BH') %>% add_x_position(x = 'group')
+increase = 1.3
+base = 12.5
+pos_y_comparisons = c(base + c(0,1,3,5)*increase, base+c(0,2,4)*increase, base+0:1*increase, base)
+plot_data %>% ggplot(aes(gene.score, MeanExpr)) + 
+              geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=gene.score)) +
+              stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .02) +
+              scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + 
+              xlab('') + ylab('Mean Expression') + 
+              scale_x_discrete(labels=c('1' = 'SFARI\nScore 1', '2' = 'SFARI\nScore 2', '3' = 'SFARI\nScore 3', 
+                                        'Others' = 'Other\ngenes', 'Neuronal' = 'Neuronal\ngenes')) +
+              theme_minimal() + theme(legend.position='none')
+
+```
+
+
+### Log Fold Change
+
+```{r, fig.align='center'}
+
+genes_info %>% mutate(direction = ifelse(log2FoldChange>0, 'overexpressed', 'underexpressed')) %>% 
+               group_by(gene.score, direction) %>% tally(name = 'overexpressed') %>% 
+               filter(direction == 'overexpressed') %>% ungroup %>% 
+               left_join(genes_info %>% group_by(gene.score) %>% tally(name = 'Total'), by = 'gene.score') %>% ungroup %>%
+               mutate('underexpressed' = Total - overexpressed , 
+                      'ratio' = round(overexpressed/underexpressed,2)) %>% 
+               dplyr::select(gene.score, overexpressed, underexpressed, ratio) %>% 
+               kable %>% kable_styling(full_width = F)
+
+```
+<br>
+
+```{r, fig.align='center'}
+
+plot_data = data.frame('ID'=rownames(datExpr), 'MeanExpr'=rowMeans(datExpr)) %>% 
+            left_join(genes_info, by='ID')
+
+wt = plot_data %>% filter(log2FoldChange>0) %>% 
+     wilcox_test(MeanExpr~gene.score, p.adjust.method='BH') %>% add_x_position(x = 'group')
+increase = 1.5
+base = 13
+pos_y_comparisons = c(base + c(0,1,3,5)*increase, base+c(0,2,4)*increase, base+0:1*increase, base)
+p1 = plot_data %>% filter(log2FoldChange>0) %>% ggplot(aes(gene.score, MeanExpr)) +
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=gene.score)) + 
+     stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .025) +
+     scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + 
+     xlab('') + ylab('Mean Expression') + ggtitle('Overexpressed genes') +
+     scale_x_discrete(labels=c('1' = 'SFARI\nScore 1', '2' = 'SFARI\nScore 2', '3' = 'SFARI\nScore 3', 
+                                        'Others' = 'Other\ngenes', 'Neuronal' = 'Neuronal\ngenes')) +
+     theme_minimal() + theme(legend.position='none')
+
+wt = plot_data %>% filter(log2FoldChange<0) %>% 
+     wilcox_test(MeanExpr~gene.score, p.adjust.method='BH') %>% add_x_position(x = 'group')
+p2 = plot_data %>% filter(log2FoldChange<0) %>% ggplot(aes(gene.score, MeanExpr)) +
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=gene.score)) + 
+     stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .025) +
+      scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + 
+     xlab('') + ylab('Mean Expression') + ggtitle('Underexpressed genes') +
+     scale_x_discrete(labels=c('1' = 'SFARI\nScore 1', '2' = 'SFARI\nScore 2', '3' = 'SFARI\nScore 3', 
+                                        'Others' = 'Other\ngenes', 'Neuronal' = 'Neuronal\ngenes')) +
+     theme_minimal() + theme(legend.position='none')
+
+grid.arrange(p1, p2, nrow=1)
+
+```
+
+<br>
+
+Both with the original LFC values as well as the shrunken ones, the difference in LFC magnitude between SFARI genes and Neuronal genes is statisically significant with a p-value lower than $10^{-4}$.
+
+```{r fig.align='center'}
+
+wt = genes_info %>% mutate(abs_lfc = abs(log2FoldChange), 
+                           Group = factor(gene.score, levels = c('1','2','3','Others','Neuronal'))) %>% 
+     wilcox_test(abs_lfc~Group, p.adjust.method='BH') %>% add_x_position(x = 'group')
+
+increase = 0.04
+base = 0.35
+pos_y_comparisons = c(base + c(0,1,3,5)*increase, base+c(0,2,4)*increase, base+0:1*increase, base)
+p1 = genes_info %>% mutate(gene.score = factor(gene.score, levels = c('1','2','3','Others','Neuronal'))) %>%
+     ggplot(aes(gene.score, abs(log2FoldChange))) + 
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=gene.score)) + 
+     stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .005) + 
+     scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,7,8))) + 
+     coord_cartesian(ylim= c(0, max(pos_y_comparisons))) + 
+     scale_x_discrete(labels=c('1' = 'SFARI\nScore 1', '2' = 'SFARI\nScore 2', '3' = 'SFARI\nScore 3', 
+                               'Neuronal' = 'Neuronal\ngenes','Others' = 'Other\ngenes')) +
+     xlab('') + ylab('Original LFC Magnitude') + theme_minimal() + theme(legend.position='none')
+
+
+wt = genes_info %>% mutate(abs_lfc = abs(shrunken_log2FoldChange), 
+                           Group = factor(gene.score, levels = c('1','2','3','Others', 'Neuronal'))) %>% 
+     wilcox_test(abs_lfc~Group, p.adjust.method='BH') %>% add_x_position(x = 'group')
+
+increase = 0.005
+base = 0.065
+pos_y_comparisons = c(base + c(0,1,3,5)*increase, base+c(0,2,4)*increase, base+0:1*increase, base)
+p2 = genes_info %>% mutate(gene.score = factor(gene.score, levels = c('1','2','3','Others','Neuronal'))) %>%
+     ggplot(aes(gene.score, abs(shrunken_log2FoldChange))) + 
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=gene.score)) + 
+     stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .015) + 
+     scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,7,8))) + 
+     coord_cartesian(ylim= c(0, max(pos_y_comparisons))) + 
+     scale_x_discrete(labels=c('1' = 'SFARI\nScore 1', '2' = 'SFARI\nScore 2', '3' = 'SFARI\nScore 3', 
+                               'Neuronal' = 'Neuronal\ngenes', 'Others' = 'Other\ngenes')) +
+     xlab('') + ylab('Shrunken LFC Magnitude') + theme_minimal() + theme(legend.position='none')
+
+grid.arrange(p1, p2, nrow = 1)
+
+rm(increase, base, pos_y_comparisons, wt)
+```
+<br>
+
+Full plots, without cropping out outliers
+
+```{r fig.align='center'}
+
+p1 = genes_info %>% mutate(gene.score = factor(gene.score, levels = c('1','2','3','Others','Neuronal'))) %>%
+     ggplot(aes(gene.score, abs(log2FoldChange))) + 
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=gene.score)) + 
+     scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,7,8))) + 
+     scale_x_discrete(labels=c('1' = 'SFARI\nScore 1', '2' = 'SFARI\nScore 2', '3' = 'SFARI\nScore 3', 
+                               'Neuronal' = 'Neuronal\ngenes','Others' = 'Other\ngenes')) +
+     xlab('') + ylab('Original LFC Magnitude') + theme_minimal() + theme(legend.position='none')
+
+p2 = genes_info %>% mutate(gene.score = factor(gene.score, levels = c('1','2','3','Others','Neuronal'))) %>%
+     ggplot(aes(gene.score, abs(shrunken_log2FoldChange))) + 
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=gene.score)) + 
+     scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,7,8))) + 
+     scale_x_discrete(labels=c('1' = 'SFARI\nScore 1', '2' = 'SFARI\nScore 2', '3' = 'SFARI\nScore 3', 
+                               'Neuronal' = 'Neuronal\ngenes', 'Others' = 'Other\ngenes')) +
+     xlab('') + ylab('Shrunken LFC Magnitude') + theme_minimal() + theme(legend.position='none')
+
+subplot(ggplotly(p1), ggplotly(p2), nrows=1)
+```
+<br>
+
+### Differential Expression
+
+<br>
+
+There are no DE genes in the SFARI Gene group
+
+<br>
+---
+
+#### Session info
+
+```{r}
+sessionInfo()
+```
+<br><br>
