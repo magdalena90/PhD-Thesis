@@ -1,0 +1,510 @@
+---
+title: '3.2 Exploratory Analysis of clusters'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+<br>
+
+#### Load R packages and define colour functions
+```{r load_packages, warning=FALSE, message=FALSE}
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(dendextend)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(colorspace)
+library(GGally) ; library(ggpubr) ; library(ggExtra)
+library(WGCNA)
+library(expss)
+library(polycor)
+library(rstatix)
+library(biomaRt) ; library(clusterProfiler) # For the ORA
+library(foreach) ; library(doParallel)
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+
+# Get colors from the ggplot palette
+gg_colour_hue = function(n) {
+  hues = seq(15, 375, length = n+1)
+  pal = hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+# Assign an HCL rainbow colour to each module
+get_mod_colours = function(mods){
+  
+  n = length(unique(mods))-1
+  set.seed(123) ; rand_order = sample(1:n)
+  mod_colors = c('white', gg_colour_hue(n)[rand_order])
+  names(mod_colors) = mods %>% table %>% names
+  
+  return(mod_colors)
+}
+```
+
+#### Load preprocessed dataset (code in 2.1.Preprocessing_pipeline.Rmd)
+
+```{r load_dataset, echo=TRUE, message=FALSE, warning=FALSE}
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../SFARI/Data/SFARI_genes_01-03-2020_w_ensembl_IDs.csv')
+
+# Load Gandal dataset
+load('./../Data/preprocessedData/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+
+# Clusterings
+clusterings = read_csv('./../Data/preprocessedData/clusters.csv')
+
+# Updates genes_info with SFARI information and clusters
+genes_info = genes_info %>% left_join(SFARI_genes, by = 'ID') %>%
+             mutate(gene.score = ifelse(is.na(`gene-score`) & Neuronal==0, 'Others', 
+                                        ifelse(is.na(`gene-score`), 'Neuronal', `gene-score`))) %>%
+             mutate(Group = factor(ifelse(gene.score %in% c('Neuronal','Others'), gene.score, 'SFARI'), 
+                    levels = c('SFARI', 'Neuronal', 'Others'))) %>% 
+             left_join(clusterings %>% dplyr::rename(Module = Modules_dh), by='ID') %>%
+             dplyr::select(ID, baseMean, log2FoldChange, shrunken_log2FoldChange, significant, Neuronal,
+                           gene.score, Group, Module) %>%
+             mutate(module_number = Module %>% as.factor %>% as.numeric)
+
+rm(clusterings, dds)
+```
+<br>
+
+------
+
+<br>
+
+# 3.2.1 Cluster-level metrics
+
+<br>
+
+## Associations between clusters and sample traits
+
+<br>
+
+This relation is calculated using the correlation between each cluster's eigengene and a vector with value for each sample of the trait that wants to be studied.
+
+In the WGCNA documentation they use Pearson correlation, I think all of their variables were continuous. Since I have categorical variables I'm going to use the `hetcor` function, that calculates Pearson, polyserial or polychoric correlations depending on the type of variables involved.
+
+- I'm not sure how the `corPvalueStudent` function calculates the p-values and I cannot find any documentation...
+
+- Compared correlations using Pearson correlation and with hetcor and they are very similar, but a bit more extreme with hetcor. The same thing happens with the p-values.
+
+```{r calc_module_trait_associations, message=FALSE, warning=FALSE}
+
+datTraits = datMeta %>% dplyr::select(Diagnosis, Region, Sex, Age, PMI, RNAExtractionBatch) %>%
+            dplyr::rename('Batch' = RNAExtractionBatch)
+
+# Recalculate MEs with color labels
+ME_object = datExpr %>% t %>% moduleEigengenes(colors = genes_info$Module)
+MEs = orderMEs(ME_object$eigengenes)
+
+# Calculate correlation between eigengenes and the traits and their p-values
+moduleTraitCor = MEs %>% apply(2, function(x) hetcor(x, datTraits)$correlations[1,-1]) %>% t
+rownames(moduleTraitCor) = colnames(MEs)
+colnames(moduleTraitCor) = colnames(datTraits)
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nrow(datExpr))
+
+# Create text matrix for the Heatmap
+textMatrix = paste0(signif(moduleTraitCor, 2), ' (', signif(moduleTraitPvalue, 1), ')')
+dim(textMatrix) = dim(moduleTraitCor)
+
+# In case there are any NAs
+if(sum(!complete.cases(moduleTraitCor))>0){
+  print(paste0(sum(is.na(moduleTraitCor)),' correlation(s) could not be calculated')) 
+}
+
+rm(ME_object)
+```
+
+Modules have very strong correlations with Diagnosis with really small p-values and not much relation with anything else. Perhaps a little with PMI and Brain Region.
+
+```{r plot_heatmap, fig.width=10, fig.height=12, warning=FALSE, message=FALSE}
+
+# Sort moduleTraitCor by Diagnosis
+moduleTraitCor = moduleTraitCor[order(moduleTraitCor[,1], decreasing=TRUE),]
+moduleTraitPvalue = moduleTraitPvalue[order(moduleTraitCor[,1], decreasing=TRUE),]
+
+# Create text matrix for the Heatmap
+textMatrix = paste0(signif(moduleTraitCor, 2), ' (', signif(moduleTraitPvalue, 1), ')')
+dim(textMatrix) = dim(moduleTraitCor)
+
+# There's one entry of the textMatrix that is not being rounded off properly, so I'll have to set it manually
+# used to be 0.6 (8.99999999999999e-304)
+textMatrix[14,1] = '0.6 (9e-304)'
+
+# Change name of gray cluster to reflect it's not a cluster
+yLabels = paste0('Cluster ', rownames(moduleTraitCor) %>% as.factor %>% as.numeric)
+yLabels[yLabels == paste0('Cluster ', ncol(MEs))] = 'No cluster'
+
+labeledHeatmap(Matrix = moduleTraitCor, xLabels = names(datTraits), yLabels = yLabels, 
+               yColorWidth = 0, colors = diverging_hcl(21,'Tropic') %>% rev,
+               bg.lab.y = gsub('ME', '', rownames(moduleTraitCor)), xLabelsPosition = 'top', xLabelsAngle = 0,
+               textMatrix = textMatrix, setStdMargins = FALSE, cex.text = 0.8, cex.lab.y = 0.75, zlim = c(-1,1))
+
+diagnosis_cor = data.frame('Module' = gsub('ME','',rownames(moduleTraitCor)),
+                           'MTcor' = moduleTraitCor[,'Diagnosis'],
+                           'MTpval' = moduleTraitPvalue[,'Diagnosis'])
+
+genes_info = genes_info %>% left_join(diagnosis_cor, by='Module')
+
+rm(moduleTraitCor, moduleTraitPvalue, textMatrix, diagnosis_cor, yLabels)
+```
+
+## Association between Cluster-Diagnosis correlation and percentage of DE genes
+
+**Modules with a high Module-Diagnosis (absolute) correlation should have a high content of differentially expressed genes:
+
+This appears to be the case
+
+```{r MD_DE_genes, warning=FALSE, message=FALSE, fig.align='center'}
+plot_data = genes_info %>% group_by(Module, MTcor) %>% summarise(p = 100*mean(significant))
+
+ggplotly(plot_data %>% ggplot(aes(MTcor, p)) + geom_smooth(color='gray', se=FALSE) +
+         geom_point(color=plot_data$Module, alpha=0.7, aes(id=Module)) +
+         geom_hline(yintercept=mean(plot_data$p),color='gray',linetype='dotted') +
+         theme_minimal() + 
+         xlab('Cluster-diagnosis correlation') + ylab('Percentage of DE genes'))
+```
+
+<br>
+
+---
+
+<br>
+
+# 3.2.2 Gene-level metrics
+
+**Gene significance:** is the correlation between the gene and the trait we are interested in. A positive gene significance means the gene is overexpressed and a negative value means its underexpressed. (The term 'significance' is not very acurate because it's not actually measuring statistical significance, it's just a correlation, but that's how they call it in WGCNA...)
+
+**Module Membership** is the correlation of the module's eigengene and the expression profile of a gene. The higher the Module Membership, the more similar the gene is to the genes that constitute the module.
+
+<br>
+
+**Note:** Some correlations weren't able to be calculated with the original function (weirdly because the correlation was too strong), so they are calculated again in the end using the `polyserial` function instead of `hetcor`, which is robust enough to calculate them
+
+```{r module_membership}
+# It's more efficient to iterate the correlations one by one, otherwise it calculates correlations between the eigengenes and also between the genes, which we don't need
+
+# Check if MM information already exists and if not, calculate it
+if(file.exists('./../Data/preprocessedData/WGCNA_metrics.csv')){
+  
+  dataset = read.csv('./../Data/preprocessedData/WGCNA_metrics.csv')
+  #dataset$Module = dataset[,clustering_selected]
+  
+} else {
+  
+  ############# 1. Calculate Gene Significance
+  GS_info = data.frame('ID'=rownames(datExpr),
+                       'GS'=datExpr %>% apply(1, function(x) hetcor(x,datMeta$Diagnosis)$correlations[1,2])) %>%
+            mutate('GSpval'=corPvalueStudent(GS, ncol(datExpr)))
+  
+  #############  2. Calculate Module Membership
+  
+  #setup parallel backend to use many processors
+  cores = detectCores()
+  cl = makeCluster(cores-1)
+  registerDoParallel(cl)
+  
+  # Create matrix with MM by gene
+  MM = foreach(i=1:nrow(datExpr), .combine=rbind) %dopar% {
+    library(polycor)
+    tempMatrix = apply(MEs, 2, function(x) hetcor(as.numeric(datExpr[i,]), x)$correlations[1,2])
+    tempMatrix
+  }
+  
+  # Stop clusters
+  stopCluster(cl)
+  
+  rownames(MM) = rownames(datExpr)
+  colnames(MM) = paste0('MM', gsub('ME','',colnames(MEs)))
+  
+  # Calculate p-values
+  MMpval = MM %>% corPvalueStudent(ncol(datExpr)) %>% as.data.frame
+  colnames(MMpval) = paste0('MMpval', gsub('ME','',colnames(MEs)))
+  
+  MM = MM %>% as.data.frame %>% mutate(ID = rownames(.))
+  MMpval = MMpval %>% as.data.frame %>% mutate(ID = rownames(.))
+  
+  # Join and save results
+  dataset = genes_info %>% dplyr::select(ID, gene.score, Module, module_number, MTcor, MTpval) %>%
+            left_join(GS_info, by='ID') %>%
+            left_join(MM, by='ID') %>%
+            left_join(MMpval, by='ID')
+  
+  write.csv(dataset, file = './../Data/preprocessedData/WGCNA_metrics.csv', row.names = FALSE)
+  
+  rm(cores, cl) 
+  
+}
+
+GS_missing = dataset$ID[is.na(dataset$GS)] %>% as.character
+
+if(length(GS_missing)>0){
+  
+  cat(paste0(length(GS_missing),' correlations between genes and Diagnosis could not be calculated, ',
+             'calculating them with the polyserial function'))
+  
+  for(g in GS_missing){
+    dataset$GS[dataset$ID == g] = polyserial(as.numeric(datExpr[g,]), datMeta$Diagnosis)
+  }
+  
+}
+
+rm(GS_missing)
+
+```
+
+## Association between Gene Significance and cluster-diagnosis correlation
+
+```{r MTcor_vs_GS, fig.width=10, message=FALSE, warning=FALSE}
+plot_data = dataset %>% dplyr::select(ID, MTcor, GS) %>% mutate(mean_expr = rowMeans(datExpr)) %>%
+            left_join(genes_info %>% dplyr::select(ID, Group, gene.score), by='ID') %>%
+            left_join(genes_info %>% dplyr::select(ID, log2FoldChange, shrunken_log2FoldChange, significant, 
+                                                   Module), by='ID') %>%
+            left_join(data.frame(MTcor=unique(dataset$MTcor)) %>% arrange(by=MTcor) %>% 
+                                 mutate(order=1:length(unique(dataset$MTcor))), by='MTcor')
+
+plot_data %>% ggplot(aes(MTcor, GS)) + geom_point(color = plot_data$Module, alpha = 0.1) + 
+              geom_smooth(color='gray', se = FALSE) + theme_minimal() + 
+              xlab('Cluster-diagnosis correlation') + ylab('Gene Significance') + 
+              ggtitle(paste0('R^2=',round(cor(plot_data$MTcor, plot_data$GS)^2,2)))
+```
+
+## Association to log-fold change
+
+```{r vs_lfc, warning=FALSE, message=FALSE, fig.width=10}
+
+p1 = plot_data %>% ggplot(aes(MTcor, shrunken_log2FoldChange)) + geom_point(color=plot_data$Module, alpha=0.1) + 
+         geom_smooth(color='gray', se=FALSE) + xlab('Cluster-diagnosis correlation') + ylab('Shrunken LFC') +
+         theme_minimal() + ggtitle(paste0('R^2 = ', round(cor(plot_data$log2FoldChange, plot_data$MTcor)[1]**2,2)))
+  
+p2 = plot_data %>% ggplot(aes(GS, shrunken_log2FoldChange)) + geom_point(color=plot_data$Module, alpha=0.1) + 
+         geom_smooth(color='gray', se=FALSE) + xlab('Gene Significance') + ylab('Shrunken LFC') +
+         theme_minimal() + ggtitle(paste0('R^2 = ', round(cor(plot_data$log2FoldChange, plot_data$GS)[1]**2,2)))
+
+grid.arrange(p1, p2, nrow=1)
+
+rm(p1,p2)
+```
+
+## Association to mean level of expression
+
+```{r vs_mean_expr, warning=FALSE, message=FALSE, fig.width=10}
+
+p1 = plot_data %>% ggplot(aes(MTcor, mean_expr)) + 
+     geom_point(color=plot_data$Module, alpha=0.1) + geom_smooth(color='gray', se = TRUE, alpha = 0.2) + 
+     xlab('Cluster-diagnosis correlation') + ylab('Mean level of expression') + theme_minimal() + 
+     ggtitle(paste0('R^2 = ', round(cor(plot_data$log2FoldChange, plot_data$MTcor)[1]**2,2)))
+  
+p2 = plot_data %>% ggplot(aes(GS, mean_expr)) + 
+     geom_point(color=plot_data$Module, alpha=0.1) + geom_smooth(color='gray', se = TRUE, alpha = 0.2) + 
+     xlab('Gene Significance') + ylab('Mean level of expression') + theme_minimal() + 
+     ggtitle(paste0('R^2 = ', round(cor(plot_data$log2FoldChange, plot_data$GS)[1]**2,2)))
+
+grid.arrange(p1, p2, nrow=1)
+
+rm(p1,p2)
+```
+
+3D plot to try to understand better why the patterns form MTcor and GS with mean expression don't agree between them (I don't think this helps)
+
+```{r MTcor_vs_GS_vs_mean_expr, warning=FALSE}
+
+plot_ly(plot_data, x = ~MTcor, y = ~GS, z = ~mean_expr, color= ~Module, colors = sort(unique(plot_data$Module)), 
+        alpha = 0.5, size = 0.5)
+
+```
+
+# 3.2.3 SFARI Genes
+
+## Enrichment in SFARI Genes
+
+The cluster-diagnosis correlation measures the relevance of ASD-related gene expression patterns in a cluster. We now want to use a similar metric to calculate the ``relevance" of SFARI Genes in a cluster.
+
+One way to do this would be to calculate the percentage of genes in each module that belong to the SFARI Genes, but this metric does not take into account the size of the module, so it can favour small clusters, which can have more extreme but less robust results. Instead, the Over Representation Analysis (ORA) does take the size of a cluster into consideration, using the hypergeometric distribution to calculate the probability of a module of size $n$ containing at least $s$ SFARI Genes.
+
+To do this, the ORA interprets the number of genes ($n$) in a cluster as n random draws without replacement from a finite population of size $N$, and the number of SFARI genes in the cluster ($s$) as s successes in those $n$ draws, where we know that $N$ contains exactly $S$ successes, and it uses the hypergeometric distribution to calculate the statistical significance of having drawn $s$ successes out of $n$ draws.
+
+```{r calculate_ORA}
+# Calculate % and ORA of SFARI Genes in each module
+
+modules = unique(genes_info$Module[genes_info$Module!='gray']) %>% as.character
+
+# We need the entrez ID of the genes for this
+getinfo = c('ensembl_gene_id','entrezgene')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl', 
+               host='feb2014.archive.ensembl.org')
+biomart_output = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), 
+                       values=genes_info$ID[genes_info$Module!='gray'], mart=mart) %>%
+                 left_join(genes_info %>% dplyr::select(ID, Module,gene.score), by = c('ensembl_gene_id'='ID'))
+
+# We need to build a term2gene dataframe with the genes and their SFARI Scores
+term2gene = biomart_output %>% mutate(term = ifelse(gene.score == 'Others', 'Others', 'SFARI'), 
+                                      'gene' = entrezgene) %>%  dplyr::select(term, gene) %>% distinct
+
+
+enrichment_data = data.frame('Module' = modules, 'size' = 0, 'perc_SFARI' = 0,
+                             'pval_ORA' = 0, 'padj_ORA' = 0)
+
+for(i in 1:length(modules)){
+  module = modules[i]
+  genes_in_module = biomart_output$entrezgene[biomart_output$Module==module]
+  ORA_module = enricher(gene = genes_in_module, universe = biomart_output$entrezgene %>% as.character, 
+                        pAdjustMethod = 'bonferroni', TERM2GENE = term2gene, 
+                        pvalueCutoff = 1, qvalueCutoff = 1, maxGSSize = 50000) %>% 
+                        data.frame %>% dplyr::select(-geneID,-Description)
+  ORA_pval = ifelse('SFARI' %in% ORA_module$ID, ORA_module$pvalue[ORA_module$ID=='SFARI'], 1)
+  ORA_padj = ifelse('SFARI' %in% ORA_module$ID, ORA_module$p.adjust[ORA_module$ID=='SFARI'], 1)
+  enrichment_data[i,-1] = c(length(genes_in_module), 
+                            mean(genes_info$gene.score[genes_info$Module==module]!='Others'), 
+                            ORA_pval, ORA_padj)
+}
+
+enrichment_data = enrichment_data %>% 
+                  left_join(genes_info %>% dplyr::select(Module, MTcor) %>% unique, by = 'Module')
+
+
+rm(i, module, genes_in_module, ORA_module, ORA_pval, ORA_padj, getinfo, mart, term2gene)
+```
+
+```{r ORA_vs_perc_SFARI_Genes}
+ggplotly(enrichment_data %>% ggplot(aes(perc_SFARI, 1-pval_ORA, size=size)) + 
+         geom_point(color = enrichment_data$Module, alpha = 0.5, aes(id=Module)) + 
+         geom_smooth(color='gray', se = TRUE, alpha = 0.1) + 
+         xlab('Percentage of SFARI Genes') + ylab('ORA Enrichment') + theme_minimal() + ggtitle('Modules'))
+```
+
+## Association between the Enrichment in SFARI Genes and cluster-diagnosis correlation
+
+There doesn’t seem to be a strong relation between these two metrics, if anything, they seem to contradict each other, mainly in modules with a high Module-Diagnosis correlation, which are the ones with the lowest trend for Enrichment on SFARI Genes.
+
+
+```{r ORA_vs_MTcor, warning=FALSE, message=FALSE}
+
+ggplotly(enrichment_data %>% ggplot(aes(MTcor, 1-pval_ORA, size=size)) + 
+         geom_point(color=enrichment_data$Module, alpha=0.5, aes(id=Module)) + 
+         geom_smooth(color='#cccccc', size = 0.5,alpha=0.1) + 
+         xlab('Module-Diagnosis Correlation') + ylab('Enrichment in SFARI Genes') + 
+         theme_minimal() + theme(legend.position = 'none') + 
+         ggtitle('SFARI Enrichment vs Module-Diagnosis Correlation'))
+
+```
+
+<br>
+
+## Assoiation between Enrichment in SFARI Genes and LFC and Mean expression
+
+There doesn't seem to be a strong relation between the enrichment in SFARI Genes and the LFC nor the level of expression of the genes in the cluster
+
+```{r SFARI_enrichment_vs_LFC_and_mean_expr, fig.width=10, warning=FALSE, message=FALSE}
+
+plot_data = plot_data %>% left_join(enrichment_data %>% dplyr::select(Module, padj_ORA), by = 'Module')
+
+p1 = plot_data %>% ggplot(aes(1-padj_ORA, shrunken_log2FoldChange)) + 
+     geom_point(color=plot_data$Module, alpha=0.1) + geom_smooth(color='gray', se=TRUE, alpha = 0.1) + 
+     xlab('Enrichment in SFARI Genes') + ylab('Shrunken LFC') + theme_minimal() + 
+     ggtitle(paste0('R^2 = ', round(cor(plot_data$log2FoldChange, plot_data$MTcor)[1]**2,2)))
+
+p2 = plot_data %>% ggplot(aes(1-padj_ORA, mean_expr)) + geom_point(color=plot_data$Module, alpha=0.1) +   
+     geom_smooth(color='gray', se = TRUE, alpha = 0.2) + 
+     xlab('Enrichment in SFARI Genes') + ylab('Mean level of expression') + theme_minimal() + 
+     ggtitle(paste0('R^2 = ', round(cor(plot_data$log2FoldChange, plot_data$GS)[1]**2,2)))
+
+grid.arrange(p1, p2, nrow=1)
+
+rm(p1,p2)
+```
+
+<br>
+
+## Association between WGCNA metrics and SFARI Genes
+
+```{r fig.width=10, MTcor_and_GS_vs_SFARI_Genes}
+
+wt = plot_data %>% mutate(abs_GS = abs(GS), Group = factor(Group, levels = c('SFARI','Neuronal','Others'))) %>% 
+     wilcox_test(abs_GS~Group, p.adjust.method='BH') %>% add_x_position(x = 'group')
+increase = 0.1
+base = 1.05
+pos_y_comparisons = c(base, base + increase, base)
+
+p1 = plot_data %>% mutate(Group = factor(Group, levels = c('SFARI', 'Neuronal', 'Others'))) %>%
+     ggplot(aes(Group, abs(GS))) + 
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=Group)) + 
+     stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .02) + 
+     scale_fill_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + theme_minimal() + 
+     scale_x_discrete(labels=c('SFARI' = 'SFARI\nGenes', 'Others' = 'Other\ngenes',
+                              'Neuronal' = 'Neuronal\ngenes')) +
+     ylab('Gene Significance magnitude') + xlab('SFARI Scores') + theme(legend.position='none')
+
+wt = plot_data %>% mutate(abs_MTcor=abs(MTcor), Group=factor(Group, levels=c('SFARI','Neuronal','Others'))) %>% 
+     wilcox_test(abs_MTcor~Group, p.adjust.method='BH') %>% add_x_position(x = 'group')
+increase = 0.08
+base = 1.05
+pos_y_comparisons = c(base, base + increase, base)
+
+p2 = plot_data %>% mutate(Group = factor(Group, levels = c('SFARI', 'Neuronal', 'Others'))) %>%
+     ggplot(aes(Group, abs(MTcor))) + 
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=Group)) + 
+     stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .02) + 
+     scale_fill_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + theme_minimal() + 
+     scale_x_discrete(labels=c('SFARI' = 'SFARI\nGenes', 'Others' = 'Other\ngenes',
+                              'Neuronal' = 'Neuronal\ngenes')) +
+     ylab('Cluster-diagnosis correlation magnitude') + xlab('SFARI Scores') + theme(legend.position='none')
+
+grid.arrange(p2, p1, nrow=1)
+
+rm(p1, p2, increase, base, pos_y_comparisons, wt)
+```
+
+<br>
+
+## Association between WGCNA metrics and SFARI Scores
+
+```{r fig.width=10, MTcor_and_GS_vs_SFARI_scores}
+
+comparisons = list(c('1','2'), c('2','3'), c('3','Neuronal'), c('Neuronal','Others'),
+                   c('1','3'), c('3','Others'), c('2','Neuronal'),
+                   c('1','Neuronal'), c('2','Others'), c('1','Others'))
+increase = 0.1
+base = 1.05
+pos_y_comparisons = c(rep(base, 4), rep(base + increase, 2), base + 2:5*increase)
+
+p1 = plot_data %>% ggplot(aes(gene.score, abs(GS), fill=gene.score)) + 
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3) + 
+     stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                        method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
+                        tip.length = .02) +
+     scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + theme_minimal() + 
+     scale_x_discrete(labels=c('1' = 'SFARI\nScore 1', '2' = 'SFARI\nScore 2', '3' = 'SFARI\nScore 3', 
+                               'Others' = 'Other\ngenes', 'Neuronal' = 'Neuronal\ngenes')) +
+     ylab('Gene Significance magnitude') + xlab('SFARI Scores') + theme(legend.position='none')
+
+
+increase = 0.08
+base = 1
+pos_y_comparisons = c(rep(base, 4), rep(base + increase, 2), base + 2:5*increase)
+
+p2 = plot_data %>% ggplot(aes(gene.score, abs(MTcor), fill=gene.score)) + 
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3) + 
+     stat_compare_means(comparisons = comparisons, label = 'p.signif', method = 't.test', 
+                        method.args = list(var.equal = FALSE), label.y = pos_y_comparisons, 
+                        tip.length = .01) +
+     scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + theme_minimal() + 
+     scale_x_discrete(labels=c('1' = 'SFARI\nScore 1', '2' = 'SFARI\nScore 2', '3' = 'SFARI\nScore 3', 
+                               'Others' = 'Other\ngenes', 'Neuronal' = 'Neuronal\ngenes')) +
+     ylab('Cluster-diagnosis correlation magnitude') + xlab('SFARI Scores') + theme(legend.position='none')
+
+grid.arrange(p2, p1, nrow=1)
+
+rm(p1, p2, comparisons, increase, base, pos_y_comparisons)
+```
+
+---
+
+#### Session info
+
+```{r}
+sessionInfo()
+```
+<br><br>

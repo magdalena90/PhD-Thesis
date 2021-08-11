@@ -1,0 +1,643 @@
+---
+title: '3.3 Top clusters'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+<br>
+
+#### Load R packages and define colour functions
+```{r load_packages, warning=FALSE, message=FALSE}
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(dendextend)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(colorspace)
+library(GGally) ; library(ggpubr) ; library(ggExtra)
+library(WGCNA)
+library(expss)
+library(polycor)
+library(biomaRt)
+library(clusterProfiler) ; library(ReactomePA) ; library(DOSE) ; library(org.Hs.eg.db)
+library(knitr) ; library(kableExtra)
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+
+# Get colors from the ggplot palette
+gg_colour_hue = function(n) {
+  hues = seq(15, 375, length = n+1)
+  pal = hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+# Assign an HCL rainbow colour to each module
+get_mod_colours = function(mods){
+  
+  n = length(unique(mods))-1
+  set.seed(123) ; rand_order = sample(1:n)
+  mod_colors = c('white', gg_colour_hue(n)[rand_order])
+  names(mod_colors) = mods %>% table %>% names
+  
+  return(mod_colors)
+}
+```
+
+#### Load preprocessed dataset (code in 2.1.Preprocessing_pipeline.Rmd)
+
+```{r load_dataset, echo=TRUE, message=FALSE, warning=FALSE}
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../SFARI/Data/SFARI_genes_01-03-2020_w_ensembl_IDs.csv')
+
+# Load Gandal dataset
+load('./../Data/preprocessedData/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+
+# WGCNA metrics
+WGCNA_metrics = read.csv('./../Data/preprocessedData/WGCNA_metrics.csv')
+
+# Updates genes_info with SFARI information and clusters
+genes_info = genes_info %>% left_join(SFARI_genes, by = 'ID') %>% 
+             left_join(datGenes %>% mutate(ID = rownames(.)) %>% dplyr::select(ID, hgnc_symbol), by = 'ID') %>%
+             dplyr::select(ID, hgnc_symbol, log2FoldChange, shrunken_log2FoldChange, significant, Neuronal) %>%
+             left_join(WGCNA_metrics, by = 'ID') %>% dplyr::select(-contains('pval'))
+
+
+rm(dds, WGCNA_metrics)
+```
+<br>
+
+------
+
+<br>
+
+# 3.3.1 Top clusters by Cluster-diagnosis correlation
+
+<br>
+
+### Selecting the top clusters
+
+Modules with a cluster-diagnosis correlation manitude larger than 0.9
+
+```{r select_top_modules}
+plot_data = genes_info %>% dplyr::select(Module, module_number, MTcor) %>% distinct %>% 
+            mutate(alpha = ifelse(abs(MTcor)>0.9, 1, 0.3))
+
+top_modules = plot_data %>% arrange(desc(MTcor)) %>% filter(abs(MTcor) > 0.9) %>% pull(Module) %>% as.character
+```
+
+The `r length(top_modules)` modules that fulfill this condition are clusters `r paste(sort(unique(genes_info$module_number[genes_info$Module %in% top_modules])), collapse=', ')`
+
+```{r fig.width=10}
+ggplotly(plot_data %>% mutate(module_number=ifelse(module_number == max(module_number), 'No cluster', 
+                                                   paste('Cluster', module_number))) %>%
+         ggplot(aes(reorder(module_number, -MTcor), MTcor)) + 
+         geom_bar(stat='identity', fill = plot_data$Module, alpha = plot_data$alpha) + 
+         geom_hline(yintercept =c(0.9, -0.9), color = 'gray', linetype = 'dotted') + 
+         xlab('Clusters')+ ylab('Cluster-diagnosis correlation') + theme_minimal() + 
+         theme(axis.text.x = element_text(angle = 90, hjust = 1)))
+```
+
+The modules consist mainly of points with high (absolute) values in PC2 (which we know is related to lfc), so this result is consistent with the high correlation between Module and Diagnosis, although some of the points with the highest PC2 values do not belong to these top modules
+
+The genes belonging to the modules with the positive Module-Diagnosis correlation have positive LFC values and the genes belonging to the modules with the negative Module-Diagnosis correlation have negative values.
+
+```{r warning=FALSE}
+pca = datExpr %>% prcomp
+
+plot_data = data.frame('ID'=rownames(datExpr), 'PC1' = pca$x[,1], 'PC2' = pca$x[,2]) %>%
+            left_join(genes_info %>% dplyr::select(ID,Module,module_number,gene.score,hgnc_symbol), by='ID') %>%
+            mutate(ImportantModules = ifelse(Module %in% top_modules, as.character(Module), 'Others')) %>%
+            mutate(ImportantModules_number = ifelse(ImportantModules == 'Others', 'Others',
+                   paste('Cluster', genes_info$module_number[genes_info$Module==ImportantModules]))) %>%
+            mutate(color = ifelse(ImportantModules=='Others', 'gray', ImportantModules),
+                   alpha = ifelse(ImportantModules=='Others', 0.2, 0.4),
+                   gene_id = paste0(ID, ' (', hgnc_symbol, ')')) %>%
+            apply_labels(ImportantModules_number = 'Top Clusters')
+
+cro(plot_data$ImportantModules_number)
+
+ggplotly(plot_data %>% ggplot(aes(PC1, PC2, color=ImportantModules)) + 
+         geom_point(alpha=plot_data$alpha, color=plot_data$color, aes(ID=gene_id)) + theme_minimal() +
+         xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1],2),'%)')) +
+         ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2],2),'%)')) +
+         ggtitle('Genes belonging to the clusters with the strongest relation to ASD'))
+
+rm(pca)
+```
+
+<br>
+
+### Module Eigengenes
+
+<br>
+
+Since these modules have the strongest relation to autism, this pattern should be reflected in their model eigengenes, having two different behaviours for the samples corresponding to autism and the ones corresponding to control
+
+In all cases, the Eigengenes separate the behaviour between autism and control samples very clearly (p-value < $10^{-4}$). Modules with positive Module-Diagnosis correlation have higher eigengenes in the ASD samples and Modules with a negative correlation, in the Control samples
+```{r, fig.width=10, fig.align='center', warning=FALSE, message=FALSE}
+
+plot_EGs = function(module){
+
+  plot_data = data.frame('ID' = rownames(MEs), 'MEs' = MEs[,paste0('ME', module)], 
+                         'Diagnosis' = datMeta$Diagnosis)
+
+  p = plot_data %>% ggplot(aes(Diagnosis, MEs, fill=Diagnosis)) + 
+      geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3) +
+      ggtitle(paste0('Cluster ', genes_info$module_number[genes_info$Module==module][1], 
+                     '  (MTcor=',round(genes_info$MTcor[genes_info$Module == module][1],2),')')) + 
+      stat_compare_means(method = 't.test', method.args = list(var.equal = FALSE), label = 'p.signif',
+                        ref.group = 'ASD') +
+      ylab('Cluster Eigengenes') + theme_minimal() + theme(legend.position='none')#, plot.margin = margin(0,0,0,2,'cm'))
+  
+  return(p)
+}
+
+
+# Calculate Module Eigengenes
+ME_object = datExpr %>% t %>% moduleEigengenes(colors = genes_info$Module)
+MEs = orderMEs(ME_object$eigengenes)
+
+p1 = plot_EGs(top_modules[1])
+p2 = plot_EGs(top_modules[2])
+p3 = plot_EGs(top_modules[3])
+
+grid.arrange(p1, p2, p3, nrow=1)
+
+rm(plot_EGs, ME_object, MEs, p1, p2, p3)
+```
+<br>
+
+### Identifying representative genes for each Module
+<br>
+
+In the WGCNA pipeline, the most representative genes of each module are selected based on having a high module membership as well as a high (absolute) gene significance, so I'm going to do the same
+
+SFARI Genes don't seem to be more representative than the rest of the genes
+
+```{r, warning=FALSE}
+
+create_plot = function(module){
+  
+  plot_data = genes_info %>% dplyr::select(ID, paste0('MM.',gsub('#', '', module)), GS, gene.score) %>% 
+              filter(genes_info$Module==module)
+  colnames(plot_data)[2] = 'MM'
+  
+  SFARI_colors = as.numeric(names(table(as.character(plot_data$gene.score)[plot_data$gene.score!='Others'])))
+  
+  p = ggplotly(plot_data %>% mutate(gene.score = ifelse(gene.score =='Others', 'Not in SFARI', 
+                                                        as.character(gene.score))) %>% 
+               ggplot(aes(MM, GS, color=gene.score)) +
+               geom_point(alpha=0.5, aes(ID=ID)) +  xlab('Cluster Membership') + ylab('Gene Significance') +
+               ggtitle(paste0('Cluster ', genes_info$module_number[genes_info$Module==module][1], '  (MTcor = ', 
+                              round(genes_info$MTcor[genes_info$Module == module][1],2),')')) +
+               scale_color_manual(values=SFARI_colour_hue(r=c(SFARI_colors,7))) + theme_minimal())
+  
+  # For thesis
+  # p = plot_data %>% mutate(gene.score = ifelse(gene.score =='Others', 'Not in SFARI', 
+  #                                              ifelse(gene.score=='Neuronal', as.character(gene.score), 
+  #                                                     paste('Score',as.character(gene.score))))) %>% 
+  #     mutate(gene.score = factor(gene.score, levels = c('Score 1', 'Score 2', 'Score 3', 'Neuronal', 
+  #                                                       'Not in SFARI')),
+  #            alpha = ifelse(grepl('Score', gene.score), 1, 0)) %>%
+  #     ggplot(aes(MM, GS, color=gene.score, shape = gene.score)) + geom_point(aes(alpha = alpha)) +  
+  #     xlab('Cluster Membership') + ylab('Gene Significance') + scale_alpha_binned(range = c(0.5, 0.9)) +
+  #     scale_color_manual(values=SFARI_colour_hue(r=c(SFARI_colors,7))) + theme_minimal() + 
+  #     labs(color = 'SFARI Score', shape = 'SFARI Score') + guides(alpha = FALSE)
+  # if(module != top_modules[length(top_modules)]) {p = p + theme(legend.position = 'none')}
+  
+  return(p)
+}
+
+create_plot(top_modules[1])
+create_plot(top_modules[2])
+create_plot(top_modules[3])
+
+rm(create_plot)
+```
+
+
+#### Top 10 genes for each module
+<br>
+
+Ordered by $\frac{MM+|GS|}{2}$
+
+There aren't that many SFARI genes in the top genes of the modules
+```{r select_important_genes, warning=FALSE, message=FALSE}
+
+create_table = function(module){
+  top_genes = genes_info %>% dplyr::select(ID, hgnc_symbol, paste0('MM.',gsub('#','',module)), GS, gene.score) %>% 
+              filter(genes_info$Module==module) %>% dplyr::rename('MM' = paste0('MM.',gsub('#','',module))) %>% 
+              mutate(Relevance = (MM+abs(GS))/2, 
+                     gene.score = ifelse(gene.score == 'Others', 'Not in SFARI', as.character(gene.score))) %>% 
+              arrange(by=-Relevance) %>% top_n(10) %>% 
+              dplyr::rename('Gene Symbol' = hgnc_symbol, 'SFARI Score' = gene.score)
+  return(top_genes)
+}
+
+top_genes = list()
+for(i in 1:length(top_modules)) top_genes[[i]] = create_table(top_modules[i])
+
+kable(top_genes[[1]] %>% dplyr::select(-ID), 
+      caption=paste0('Top 10 genes for Module ', genes_info$module_number[genes_info$Module==top_modules[1]][1], 
+      '  (MTcor = ', round(genes_info$MTcor[genes_info$Module == top_modules[1]][1],2),')')) %>% 
+      kable_styling(full_width = F)
+
+kable(top_genes[[2]] %>% dplyr::select(-ID), 
+      caption=paste0('Top 10 genes for Module ', genes_info$module_number[genes_info$Module==top_modules[2]][1], 
+      '  (MTcor = ', round(genes_info$MTcor[genes_info$Module == top_modules[2]][1],2),')')) %>% 
+      kable_styling(full_width = F)
+
+kable(top_genes[[3]] %>% dplyr::select(-ID), 
+      caption=paste0('Top 10 genes for Module ', genes_info$module_number[genes_info$Module==top_modules[3]][1], 
+      '  (MTcor = ', round(genes_info$MTcor[genes_info$Module == top_modules[3]][1],2),')')) %>% 
+      kable_styling(full_width = F)
+
+rm(create_table, i)
+```
+
+Most of the top genes, idenpendently of the cluster, have very high absolute values for the 2nd principal component
+
+```{r fig.align = 'center'}
+pca = datExpr %>% prcomp
+
+ids = c()
+for(tg in top_genes) ids = c(ids, tg$ID)
+
+plot_data = data.frame('ID'=rownames(datExpr), 'gene_name' = genes_info$hgnc_symbol, 
+                       'PC1' = pca$x[,1], 'PC2' = pca$x[,2]) %>%
+            left_join(genes_info, by='ID') %>% dplyr::select(ID, PC1, PC2,gene_name, Module, gene.score) %>%
+            mutate(color = ifelse(Module %in% top_modules, as.character(Module), '#cccccc')) %>%
+            mutate(alpha = ifelse(color %in% top_modules & ID %in% ids, 1,
+                                  ifelse(color %in% top_modules, 0.25, 0.1)))
+
+plot_data %>% ggplot(aes(PC1, PC2)) + geom_point(alpha=plot_data$alpha, color=plot_data$color) + 
+              geom_text(aes(label=ifelse(ID %in% ids,as.character(gene_name),'')),
+                        color = plot_data$color, size = 2.5, hjust = 0, vjust = 0) +
+              xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1],2),'%)')) +
+              ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2],2),'%)')) +
+              theme_minimal() + ggtitle('Most relevant genes for top clusters')
+
+rm(pca, tg, plot_data)
+```
+<br>
+
+
+`r sum(genes_info$significant[genes_info$ID %in% ids])`/30 genes are differentially expressed
+
+`r sum(genes_info$gene.score[genes_info$ID %in% ids] %in% c('1','2','3'))`/30 genes are differentially expressed (`r paste(genes_info$hgnc_symbol[genes_info$ID %in% ids & genes_info$gene.score %in% c('1','2','3')], collapse=', ')`)
+
+Level of expression by Diagnosis for top genes, ordered by relevance (as defined above): There is a visible difference in level of expression between diagnosis groups in all of these genes
+```{r, warning=FALSE, fig.width=10}
+
+create_plot = function(i){
+  
+  plot_data = datExpr[rownames(datExpr) %in% top_genes[[i]]$ID,] %>% mutate('ID' = rownames(.)) %>% 
+              melt(id.vars='ID') %>% mutate(variable = gsub('X','',variable)) %>%
+              left_join(top_genes[[i]], by='ID') %>%
+              left_join(datMeta %>% dplyr::select(Dissected_Sample_ID, Diagnosis),
+                        by = c('variable'='Dissected_Sample_ID')) %>% arrange(desc(Relevance))
+  
+  p = ggplotly(plot_data %>% mutate(external_gene_id=factor(`Gene Symbol`, 
+                                    levels=unique(plot_data$`Gene Symbol`), ordered=T)) %>%
+               ggplot(aes(external_gene_id, value, fill=Diagnosis)) + geom_boxplot() + theme_minimal() +
+                      ggtitle(paste0('Top genes for cluster ', 
+                                     genes_info$module_number[genes_info$Module==top_modules[i]][1], 
+                                     ' (MTcor = ',
+                      round(genes_info$MTcor[genes_info$Module == top_modules[i]][1],2), ')')) + 
+                      xlab('') + ylab('Level of Expression') +
+                      theme(axis.text.x = element_text(angle = 90, hjust = 1)))
+  
+  # For thesis
+  # p = plot_data %>% mutate(external_gene_id=factor(`Gene Symbol`, 
+  #                                   levels=rev(unique(plot_data$`Gene Symbol`)), ordered=T)) %>%
+  #     ggplot(aes(external_gene_id, value, fill=Diagnosis)) + 
+  #     geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) +
+  #     xlab('') + ylab('Level of expression') + theme_minimal() + coord_flip()
+  # if(i < length(top_modules)) {p = p + theme(legend.position = 'none')}
+  
+  return(p)
+  
+}
+
+create_plot(1)
+create_plot(2)
+create_plot(3)
+
+
+rm(create_plot)
+```
+
+<br><br>
+
+---
+
+<br>
+
+# 3.3.2 Top clusters by enrichment in SFARI Genes
+
+<br>
+
+### Selecting the top clusters
+
+Using ORA, as it was done in the previous section and selecting as top clusters the ones with an adjusted p-value lower than $10^{-3}$ (enrichment higher than 0.999)
+
+```{r select_top_modules_SFARI}
+# Calculate % and ORA of SFARI Genes in each module
+
+#modules = unique(genes_info$Module[genes_info$Module!='gray']) %>% as.character
+modules = unique(genes_info$Module) %>% as.character
+
+# We need the entrez ID of the genes for this
+getinfo = c('ensembl_gene_id','entrezgene')
+mart = useMart(biomart='ENSEMBL_MART_ENSEMBL', dataset='hsapiens_gene_ensembl', 
+               host='feb2014.archive.ensembl.org')
+biomart_output = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), 
+                       values=genes_info$ID, mart=mart) %>%
+                 left_join(genes_info %>% dplyr::select(ID, Module,gene.score), by = c('ensembl_gene_id'='ID'))
+
+# We need to build a term2gene dataframe with the genes and their SFARI Scores
+term2gene = biomart_output %>% mutate(term = ifelse(gene.score == 'Others', 'Others', 'SFARI'), 
+                                      'gene' = entrezgene) %>%  dplyr::select(term, gene) %>% distinct
+
+
+enrichment_data = data.frame('Module' = modules, 'size' = 0, 'perc_SFARI' = 0,
+                             'pval_ORA' = 0, 'padj_ORA' = 0)
+
+for(i in 1:length(modules)){
+  module = modules[i]
+  genes_in_module = biomart_output$entrezgene[biomart_output$Module==module]
+  ORA_module = enricher(gene = genes_in_module, universe = biomart_output$entrezgene %>% as.character, 
+                        pAdjustMethod = 'bonferroni', TERM2GENE = term2gene, 
+                        pvalueCutoff = 1, qvalueCutoff = 1, maxGSSize = 50000) %>% 
+                        data.frame %>% dplyr::select(-geneID,-Description)
+  ORA_pval = ifelse('SFARI' %in% ORA_module$ID, ORA_module$pvalue[ORA_module$ID=='SFARI'], 1)
+  ORA_padj = ifelse('SFARI' %in% ORA_module$ID, ORA_module$p.adjust[ORA_module$ID=='SFARI'], 1)
+  enrichment_data[i,-1] = c(length(genes_in_module), 
+                            mean(genes_info$gene.score[genes_info$Module==module]!='Others'), 
+                            ORA_pval, ORA_padj)
+}
+
+enrichment_data = enrichment_data %>% 
+                  left_join(genes_info %>% dplyr::select(Module) %>% unique, by = 'Module')
+
+genes_info = genes_info %>% left_join(enrichment_data, by = 'Module') 
+
+plot_data = genes_info %>% dplyr::select(Module, module_number, MTcor, size, padj_ORA) %>% distinct %>% 
+            mutate(alpha = ifelse(abs(1-padj_ORA)>0.999, 1, 0.3))
+
+top_modules = plot_data %>% arrange(padj_ORA) %>% filter((1-padj_ORA) > 0.999) %>% pull(Module) %>% as.character
+
+rm(i, module, genes_in_module, ORA_module, ORA_pval, ORA_padj, getinfo, mart, term2gene)
+```
+
+The `r length(top_modules)` modules that fulfill this condition are clusters `r paste(sort(unique(genes_info$module_number[genes_info$Module %in% top_modules])), collapse=', ')`
+
+```{r fig.width=10, warning=FALSE}
+ggplotly(plot_data %>% ggplot(aes(MTcor, padj_ORA, size=size)) + 
+         geom_point(color=plot_data$Module, alpha=0.5, aes(id=module_number)) +
+         geom_hline(yintercept = 0.001, color = 'gray', linetype = 'dotted') + 
+         xlab('Cluster-diagnosis Correlation') + ylab('Corrected p-values') + scale_y_log10() +
+         theme_minimal() + theme(legend.position = 'none') +
+         ggtitle('Clusters Significantly Enriched in SFARI Genes'))
+```
+
+```{r warning=FALSE}
+pca = datExpr %>% prcomp
+
+plot_data = data.frame('ID'=rownames(datExpr), 'PC1' = pca$x[,1], 'PC2' = pca$x[,2]) %>%
+            left_join(genes_info %>% dplyr::select(ID,Module,module_number,gene.score,hgnc_symbol), by='ID') %>%
+            mutate(ImportantModules = ifelse(Module %in% top_modules, as.character(Module), 'Others')) %>%
+            mutate(ImportantModules_number = ifelse(ImportantModules == 'Others', 'Others',
+                   paste('Cluster', genes_info$module_number[genes_info$Module==ImportantModules]))) %>%
+            mutate(color = ifelse(ImportantModules=='Others', 'gray', ImportantModules),
+                   alpha = ifelse(ImportantModules=='Others', 0.2, 0.4),
+                   gene_id = paste0(ID, ' (', hgnc_symbol, ')')) %>%
+            apply_labels(ImportantModules_number = 'Top Clusters')
+
+cro(plot_data$ImportantModules_number)
+
+ggplotly(plot_data %>% ggplot(aes(PC1, PC2, color=ImportantModules)) + 
+         geom_point(alpha=plot_data$alpha, color=plot_data$color, aes(ID=gene_id)) + theme_minimal() +
+         xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1],2),'%)')) +
+         ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2],2),'%)')) +
+         ggtitle('Genes belonging to the clusters with the strongest relation to ASD'))
+
+rm(pca)
+```
+
+<br>
+
+### Module Eigengenes
+
+<br>
+
+In all cases, the Eigengenes separate the behaviour between autism and control samples very clearly (p-value < $10^{-4}$). Modules with positive Module-Diagnosis correlation have higher eigengenes in the ASD samples and Modules with a negative correlation, in the Control samples
+
+```{r, fig.width=10, fig.align='center', warning=FALSE, message=FALSE}
+
+plot_EGs = function(module){
+
+  plot_data = data.frame('ID' = rownames(MEs), 'MEs' = MEs[,paste0('ME', module)], 
+                         'Diagnosis' = datMeta$Diagnosis)
+
+  p = plot_data %>% ggplot(aes(Diagnosis, MEs, fill=Diagnosis)) + 
+      geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3) +
+      ggtitle(paste0('Cluster ', genes_info$module_number[genes_info$Module==module][1], 
+                     '  (MTcor=',round(genes_info$MTcor[genes_info$Module == module][1],2),')')) + 
+      stat_compare_means(method = 't.test', method.args = list(var.equal = FALSE), label = 'p.signif',
+                        ref.group = 'ASD') +
+      ylab('Cluster Eigengenes') + theme_minimal() + theme(legend.position='none')#, plot.margin = margin(0,0,0,2,'cm'))
+  
+  return(p)
+}
+
+
+# Calculate Module Eigengenes
+ME_object = datExpr %>% t %>% moduleEigengenes(colors = genes_info$Module)
+MEs = orderMEs(ME_object$eigengenes)
+
+p1 = plot_EGs(top_modules[1])
+p2 = plot_EGs(top_modules[2])
+p3 = plot_EGs(top_modules[3])
+
+grid.arrange(p1, p2, p3, nrow=1)
+
+rm(plot_EGs, ME_object, MEs, p1, p2, p3)
+```
+<br>
+
+<br>
+
+### Identifying representative genes for each Module
+<br>
+
+In the WGCNA pipeline, the most representative genes of each module are selected based on having a high module membership as well as a high (absolute) gene significance, so I'm going to do the same
+
+SFARI Genes don't seem to be more representative than the rest of the genes
+
+```{r, warning=FALSE}
+
+create_plot = function(module){
+  
+  plot_data = genes_info %>% dplyr::select(ID, paste0('MM.',gsub('#', '', module)), GS, gene.score) %>% 
+              filter(genes_info$Module==module)
+  colnames(plot_data)[2] = 'MM'
+  
+  SFARI_colors = as.numeric(names(table(as.character(plot_data$gene.score)[plot_data$gene.score!='Others'])))
+  
+  p = ggplotly(plot_data %>% mutate(gene.score = ifelse(gene.score =='Others', 'Not in SFARI', 
+                                                        as.character(gene.score))) %>% 
+               ggplot(aes(MM, GS, color=gene.score)) +
+               geom_point(alpha=0.5, aes(ID=ID)) +  xlab('Cluster Membership') + ylab('Gene Significance') +
+               ggtitle(paste0('Cluster ', genes_info$module_number[genes_info$Module==module][1], '  (MTcor = ', 
+                              round(genes_info$MTcor[genes_info$Module == module][1],2),')')) +
+               scale_color_manual(values=SFARI_colour_hue(r=c(SFARI_colors,7))) + theme_minimal())
+  
+  # For thesis
+  # p = plot_data %>% mutate(gene.score = ifelse(gene.score =='Others', 'Not in SFARI',
+  #                                              ifelse(gene.score=='Neuronal', as.character(gene.score),
+  #                                                     paste('Score',as.character(gene.score))))) %>%
+  #     mutate(gene.score = factor(gene.score, levels = c('Score 1', 'Score 2', 'Score 3', 'Neuronal',
+  #                                                       'Not in SFARI')),
+  #            alpha = ifelse(grepl('Score', gene.score), 1, 0)) %>%
+  #     ggplot(aes(MM, GS, color=gene.score, shape = gene.score)) + geom_point(aes(alpha = alpha)) +
+  #     xlab('Cluster Membership') + ylab('Gene Significance') + scale_alpha_binned(range = c(0.5, 0.9)) +
+  #     scale_color_manual(values=SFARI_colour_hue(r=c(SFARI_colors,7))) + theme_minimal() +
+  #     labs(color = 'SFARI Score', shape = 'SFARI Score') + guides(alpha = FALSE)
+  # if(module != top_modules[length(top_modules)]) {p = p + theme(legend.position = 'none')}
+  
+  return(p)
+}
+
+create_plot(top_modules[1])
+create_plot(top_modules[2])
+create_plot(top_modules[3])
+
+rm(create_plot)
+```
+
+
+#### Top 10 genes for each module
+<br>
+
+Ordered by $\frac{MM+|GS|}{2}$
+
+There aren't that many SFARI genes in the top genes of the modules
+```{r select_important_genes_SFARI, warning=FALSE, message=FALSE}
+
+create_table = function(module){
+  top_genes = genes_info %>% dplyr::select(ID, hgnc_symbol, paste0('MM.',gsub('#','',module)), GS, gene.score) %>% 
+              filter(genes_info$Module==module) %>% dplyr::rename('MM' = paste0('MM.', gsub('#','',module))) %>% 
+              mutate(Relevance = (MM+abs(GS))/2, 
+                     gene.score = ifelse(gene.score == 'Others', 'Not in SFARI', as.character(gene.score))) %>% 
+              arrange(by=-Relevance) %>% top_n(10) %>% 
+              dplyr::rename('Gene Symbol' = hgnc_symbol, 'SFARI Score' = gene.score)
+  return(top_genes)
+}
+
+top_genes = list()
+for(i in 1:length(top_modules)) top_genes[[i]] = create_table(top_modules[i])
+
+kable(top_genes[[1]] %>% dplyr::select(-ID), 
+      caption=paste0('Top 10 genes for Module ', genes_info$module_number[genes_info$Module==top_modules[1]][1], 
+      '  (MTcor = ', round(genes_info$MTcor[genes_info$Module == top_modules[1]][1],2),')')) %>% 
+      kable_styling(full_width = F)
+
+kable(top_genes[[2]] %>% dplyr::select(-ID), 
+      caption=paste0('Top 10 genes for Module ', genes_info$module_number[genes_info$Module==top_modules[2]][1], 
+      '  (MTcor = ', round(genes_info$MTcor[genes_info$Module == top_modules[2]][1],2),')')) %>% 
+      kable_styling(full_width = F)
+
+kable(top_genes[[3]] %>% dplyr::select(-ID), 
+      caption=paste0('Top 10 genes for Module ', genes_info$module_number[genes_info$Module==top_modules[3]][1], 
+      '  (MTcor = ', round(genes_info$MTcor[genes_info$Module == top_modules[3]][1],2),')')) %>% 
+      kable_styling(full_width = F)
+
+rm(create_table, i)
+```
+
+Top genes don't have PC2 values as high as they did with the top genes by cluster-diagnosis correlation
+
+```{r fig.align = 'center'}
+pca = datExpr %>% prcomp
+
+ids = c()
+for(tg in top_genes) ids = c(ids, tg$ID)
+
+plot_data = data.frame('ID'=rownames(datExpr), 'gene_name' = genes_info$hgnc_symbol, 
+                       'PC1' = pca$x[,1], 'PC2' = pca$x[,2]) %>%
+            left_join(genes_info, by='ID') %>% dplyr::select(ID, PC1, PC2,gene_name, Module, gene.score) %>%
+            mutate(color = ifelse(Module %in% top_modules, as.character(Module), '#cccccc')) %>%
+            mutate(alpha = ifelse(color %in% top_modules & ID %in% ids, 1,
+                                  ifelse(color %in% top_modules, 0.25, 0.1)))
+
+plot_data %>% ggplot(aes(PC1, PC2)) + geom_point(alpha=plot_data$alpha, color=plot_data$color) + 
+              geom_text(aes(label=ifelse(ID %in% ids,as.character(gene_name),'')),
+                        color = plot_data$color, size = 2.5, hjust = 0, vjust = 0) +
+              xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1],2),'%)')) +
+              ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2],2),'%)')) +
+              theme_minimal() + ggtitle('Most relevant genes for top clusters')
+
+rm(pca, tg, plot_data)
+```
+<br> 
+
+`r sum(genes_info$significant[genes_info$ID %in% ids])`/30 genes are differentially expressed
+
+`r sum(genes_info$gene.score[genes_info$ID %in% ids] %in% c('1','2','3'))`/30 genes are differentially expressed (`r paste(genes_info$hgnc_symbol[genes_info$ID %in% ids & genes_info$gene.score %in% c('1','2','3')], collapse=', ')`)
+
+Level of expression by Diagnosis for top genes, ordered by relevance (as defined above): There is a visible difference in level of expression between diagnosis groups in all of these genes, but it's not as strong as the differences in the top cluster by cluster-diagnosis correlation
+
+```{r warning=FALSE, fig.width=10}
+
+create_plot = function(i){
+  
+  plot_data = datExpr[rownames(datExpr) %in% top_genes[[i]]$ID,] %>% mutate('ID' = rownames(.)) %>% 
+              melt(id.vars='ID') %>% mutate(variable = gsub('X','',variable)) %>%
+              left_join(top_genes[[i]], by='ID') %>%
+              left_join(datMeta %>% dplyr::select(Dissected_Sample_ID, Diagnosis),
+                        by = c('variable'='Dissected_Sample_ID')) %>% arrange(desc(Relevance))
+  
+  p = ggplotly(plot_data %>% mutate(external_gene_id=factor(`Gene Symbol`, 
+                                    levels=unique(plot_data$`Gene Symbol`), ordered=T)) %>%
+               ggplot(aes(external_gene_id, value, fill=Diagnosis)) + geom_boxplot() + theme_minimal() +
+                      ggtitle(paste0('Top genes for cluster ', 
+                                     genes_info$module_number[genes_info$Module==top_modules[i]][1], 
+                                     ' (MTcor = ',
+                      round(genes_info$MTcor[genes_info$Module == top_modules[i]][1],2), ')')) + 
+                      xlab('') + ylab('Level of Expression') +
+                      theme(axis.text.x = element_text(angle = 90, hjust = 1)))
+  
+  # # For the thesis
+  # p = plot_data %>% mutate(external_gene_id=factor(`Gene Symbol`,
+  #                                   levels=rev(unique(plot_data$`Gene Symbol`)), ordered=T)) %>%
+  #     ggplot(aes(external_gene_id, value, fill=Diagnosis)) +
+  #     geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) +
+  #     xlab('') + ylab('Level of expression') + theme_minimal() + coord_flip()
+  # if(i < length(top_modules)) {p = p + theme(legend.position = 'none')}
+  
+  return(p)
+  
+}
+
+create_plot(1)
+create_plot(2)
+create_plot(3)
+
+
+rm(create_plot)
+```
+
+<br><br>
+
+
+---
+
+#### Session info
+
+```{r}
+sessionInfo()
+```
+<br><br>
+
+
