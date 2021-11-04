@@ -284,7 +284,7 @@ rm(pca, tg, plot_data)
 
 `r sum(genes_info$significant[genes_info$ID %in% ids])`/30 genes are differentially expressed
 
-`r sum(genes_info$gene.score[genes_info$ID %in% ids] %in% c('1','2','3'))`/30 genes are differentially expressed (`r paste(genes_info$hgnc_symbol[genes_info$ID %in% ids & genes_info$gene.score %in% c('1','2','3')], collapse=', ')`)
+`r sum(genes_info$gene.score[genes_info$ID %in% ids] %in% c('1','2','3'))`/30 genes are SFARI Genes (`r paste(genes_info$hgnc_symbol[genes_info$ID %in% ids & genes_info$gene.score %in% c('1','2','3')], collapse=', ')`)
 
 Level of expression by Diagnosis for top genes, ordered by relevance (as defined above): There is a visible difference in level of expression between diagnosis groups in all of these genes
 ```{r, warning=FALSE, fig.width=10}
@@ -584,7 +584,7 @@ rm(pca, tg, plot_data)
 
 `r sum(genes_info$significant[genes_info$ID %in% ids])`/30 genes are differentially expressed
 
-`r sum(genes_info$gene.score[genes_info$ID %in% ids] %in% c('1','2','3'))`/30 genes are differentially expressed (`r paste(genes_info$hgnc_symbol[genes_info$ID %in% ids & genes_info$gene.score %in% c('1','2','3')], collapse=', ')`)
+`r sum(genes_info$gene.score[genes_info$ID %in% ids] %in% c('1','2','3'))`/30 genes are SFARI Genes (`r paste(genes_info$hgnc_symbol[genes_info$ID %in% ids & genes_info$gene.score %in% c('1','2','3')], collapse=', ')`)
 
 Level of expression by Diagnosis for top genes, ordered by relevance (as defined above): There is a visible difference in level of expression between diagnosis groups in all of these genes, but it's not as strong as the differences in the top cluster by cluster-diagnosis correlation
 

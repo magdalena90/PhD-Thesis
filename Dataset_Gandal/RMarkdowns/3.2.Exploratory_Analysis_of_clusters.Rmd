@@ -371,8 +371,9 @@ rm(i, module, genes_in_module, ORA_module, ORA_pval, ORA_padj, getinfo, mart, te
 ```{r ORA_vs_perc_SFARI_Genes}
 ggplotly(enrichment_data %>% ggplot(aes(perc_SFARI, 1-pval_ORA, size=size)) + 
          geom_point(color = enrichment_data$Module, alpha = 0.5, aes(id=Module)) + 
-         geom_smooth(color='gray', se = TRUE, alpha = 0.1) + 
-         xlab('Percentage of SFARI Genes') + ylab('ORA Enrichment') + theme_minimal() + ggtitle('Modules'))
+         geom_smooth(color='gray', se = TRUE, alpha = 0.1) + coord_cartesian(ylim=c(0,1)) +
+         xlab('Percentage of SFARI Genes') + ylab('ORA Enrichment') + theme_minimal() + 
+         theme(legend.position = 'none') + ggtitle('Modules'))
 ```
 
 ## Association between the Enrichment in SFARI Genes and cluster-diagnosis correlation
@@ -386,35 +387,56 @@ ggplotly(enrichment_data %>% ggplot(aes(MTcor, 1-pval_ORA, size=size)) +
          geom_point(color=enrichment_data$Module, alpha=0.5, aes(id=Module)) + 
          geom_smooth(color='#cccccc', size = 0.5,alpha=0.1) + 
          xlab('Module-Diagnosis Correlation') + ylab('Enrichment in SFARI Genes') + 
-         theme_minimal() + theme(legend.position = 'none') + 
+         theme_minimal() + theme(legend.position = 'none') + coord_cartesian(ylim=c(0,1)) +
          ggtitle('SFARI Enrichment vs Module-Diagnosis Correlation'))
 
 ```
 
 <br>
 
-## Assoiation between Enrichment in SFARI Genes and LFC and Mean expression
+## Association between the Enrichment in SFARI Genes and the mean expression of the cluster
 
-There doesn't seem to be a strong relation between the enrichment in SFARI Genes and the LFC nor the level of expression of the genes in the cluster
+There is a positive relation between these two metrics; the higher the mean expression of the genes in a module, the higher the enrichment in SFARI Genes, especially for modules with medium to high level of expression.
 
-```{r SFARI_enrichment_vs_LFC_and_mean_expr, fig.width=10, warning=FALSE, message=FALSE}
 
-plot_data = plot_data %>% left_join(enrichment_data %>% dplyr::select(Module, padj_ORA), by = 'Module')
+```{r ORA_vs_mean_expr, warning=FALSE, message=FALSE}
 
-p1 = plot_data %>% ggplot(aes(1-padj_ORA, shrunken_log2FoldChange)) + 
-     geom_point(color=plot_data$Module, alpha=0.1) + geom_smooth(color='gray', se=TRUE, alpha = 0.1) + 
-     xlab('Enrichment in SFARI Genes') + ylab('Shrunken LFC') + theme_minimal() + 
-     ggtitle(paste0('R^2 = ', round(cor(plot_data$log2FoldChange, plot_data$MTcor)[1]**2,2)))
+mean_expr_by_module = data.frame(ID = rownames(datExpr), mean_expr = rowMeans(datExpr)) %>%
+                      left_join(dataset %>% dplyr::select(ID, Module), by = 'ID') %>% 
+                      group_by(Module) %>% summarise(mean_expr = mean(mean_expr))
 
-p2 = plot_data %>% ggplot(aes(1-padj_ORA, mean_expr)) + geom_point(color=plot_data$Module, alpha=0.1) +   
-     geom_smooth(color='gray', se = TRUE, alpha = 0.2) + 
-     xlab('Enrichment in SFARI Genes') + ylab('Mean level of expression') + theme_minimal() + 
-     ggtitle(paste0('R^2 = ', round(cor(plot_data$log2FoldChange, plot_data$GS)[1]**2,2)))
+ggplotly(enrichment_data %>% left_join(mean_expr_by_module, by = 'Module') %>% 
+         ggplot(aes(mean_expr, 1-pval_ORA, size=size)) + 
+         geom_point(color=enrichment_data$Module, alpha=0.5, aes(id=Module)) + 
+         geom_smooth(color='#cccccc', size = 0.5,alpha=0.1) + coord_cartesian(ylim=c(0,1)) +
+         xlab('Mean level of expression') + ylab('Enrichment in SFARI Genes') + 
+         theme_minimal() + theme(legend.position = 'none') + 
+         ggtitle('SFARI Enrichment vs Module-Diagnosis Correlation'))
 
-grid.arrange(p1, p2, nrow=1)
-
-rm(p1,p2)
 ```
+
+<!-- ## Assoiation between Enrichment in SFARI Genes and LFC and Mean expression -->
+
+<!-- There doesn't seem to be a strong relation between the enrichment in SFARI Genes and the LFC nor the level of expression of the genes in the cluster -->
+
+<!-- ```{r SFARI_enrichment_vs_LFC_and_mean_expr, fig.width=10, warning=FALSE, message=FALSE} -->
+
+<!-- plot_data = plot_data %>% left_join(enrichment_data %>% dplyr::select(Module, padj_ORA), by = 'Module') -->
+
+<!-- p1 = plot_data %>% ggplot(aes(1-padj_ORA, shrunken_log2FoldChange)) +  -->
+<!--      geom_point(color=plot_data$Module, alpha=0.1) + geom_smooth(color='gray', se=TRUE, alpha = 0.1) +  -->
+<!--      xlab('Enrichment in SFARI Genes') + ylab('Shrunken LFC') + theme_minimal() +  -->
+<!--      ggtitle(paste0('R^2 = ', round(cor(plot_data$log2FoldChange, plot_data$MTcor)[1]**2,2))) -->
+
+<!-- p2 = plot_data %>% ggplot(aes(1-padj_ORA, mean_expr)) + geom_point(color=plot_data$Module, alpha=0.1) +    -->
+<!--      geom_smooth(color='gray', se = TRUE, alpha = 0.2) +  -->
+<!--      xlab('Enrichment in SFARI Genes') + ylab('Mean level of expression') + theme_minimal() +  -->
+<!--      ggtitle(paste0('R^2 = ', round(cor(plot_data$log2FoldChange, plot_data$GS)[1]**2,2))) -->
+
+<!-- grid.arrange(p1, p2, nrow=1) -->
+
+<!-- rm(p1,p2) -->
+<!-- ``` -->
 
 <br>
 

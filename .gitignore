@@ -1,7 +1,6 @@
 
-# Gandal dataset
-Dataset_Gandal/Data/preprocessedData/*
-Dataset_Gandal/Data/Results/*
+Dataset_*/Data/preprocessedData/*
+Dataset_*/Data/Results/*
 
 # NCBI zip files (too heavy)
 NCBI/Data/*.gz
