@@ -1,0 +1,381 @@
+---
+title: '3.1 Algorithm'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+<br>
+
+#### Load R packages and define colour functions
+```{r load_packages, warning=FALSE, message=FALSE}
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(dendextend)
+library(RColorBrewer) ; require(gridExtra) ; library(GGally)
+suppressMessages(library(WGCNA))
+library(ClusterR)
+library(expss)
+library(knitr) ; library(kableExtra)
+
+
+# Get colors from the ggplot palette
+gg_colour_hue = function(n) {
+  hues = seq(15, 375, length = n+1)
+  pal = hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+# Assign an HCL rainbow colour to each module
+get_mod_colours = function(mods){
+  
+  n = length(unique(mods))-1
+  set.seed(123) ; rand_order = sample(1:n)
+  mod_colors = c('white', gg_colour_hue(n)[rand_order])
+  names(mod_colors) = mods %>% table %>% names
+  
+  return(mod_colors)
+}
+```
+
+#### Load preprocessed dataset (code in 2.1.Preprocessing_pipeline.Rmd)
+
+```{r load_dataset, echo=TRUE, message=FALSE, warning=FALSE}
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../SFARI/Data/SFARI_genes_01-03-2020_w_ensembl_IDs.csv')
+
+# Load Gandal dataset
+load('./../Data/preprocessedData/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+
+# Updates genes_info with SFARI information
+genes_info = genes_info %>% left_join(SFARI_genes, by = 'ID') %>%
+             mutate(gene.score = ifelse(is.na(`gene-score`) & Neuronal==0, 'Others', 
+                                        ifelse(is.na(`gene-score`), 'Neuronal', `gene-score`))) %>%
+             mutate(Group = factor(ifelse(gene.score %in% c('Neuronal','Others'), gene.score, 'SFARI'), 
+                    levels = c('SFARI', 'Neuronal', 'Others')))
+```
+<br>
+
+------
+
+<br>
+
+### Pipeline summary:
+
+<br>
+
+1. Select biweight correlation to measure the correlation between genes and the signed hybrid function to create the adjacency matrix
+
+2. Use the scale-free criterion to select the power to elevate the adjacency matrix to obtain an approximately scale-free topology using an $R^2$ threshold of 0.8
+
+3. Use the Generalised Topological Overlap Matrix (1-GTOM) to transform the similarity matrix into a distance matrix
+
+4. Perform hierarchical clustering (using average linkage `hclust(method='average')`) to create the hierarchical cluster tree
+
+5. Extract clusters using the Dynamic Hybrid algorithm from [Dynamic Tree Cut: in-depth description, tests and applications](https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/BranchCutting/Supplement.pdf)
+
+6. Merge similar clusters using Module Eigengenes
+
+<br>
+
+---
+
+<br>
+
+## 1. Define a gene co-expression similarity
+
+<br>
+
+Calculating the pairwise correlation between genes using Biweight midcorrelation because it's more robust to outliers than regular correlation or Mutual Information score
+
+<br>
+
+Correcting the correlation matrix from $s \in [-1,1]$ to $s \in [0,1]$. Three methods are proposed: 
+
+a) Unsigned: $s_{ij}=|cor(i,j)|$
+
+b) Signed: $s_{ij}=\frac{1+cor(i,j)}{2}$
+
+c) Signed Hybrid: $s_{ij}=cor(i,j)$ if $cor(i,j)>0$ and $s_{ij}=0$ else
+
+<br>
+
+Notes on each method:
+
+  - Using the unsigned adjacency we lose the direction of the correlation, but at least we maintain the magnitude of the correlation of all the genes
+
+  - Using the signed adjacency, the strongest negative correlations (-1) get mapped to 0 (no correlation) and the zero correlated genes get mapped to the average correlation (0.5), which I don't think makes much sense
+  
+  - Using the signed hybrid adjacency, we lose all the negative correlations but we mantain the magnitude of the positive ones. This seems to be the best option since genes with negative correlations usually don't share the same biological pathways, so losing this information is not as important as maintaining the correct information for the genes with the positive correlation (and combining together these two types of correlation as the unsigned approach does seems to mix different behaviours together)
+  
+**Note:** According to [this post](https://peterlangfelder.com/2018/11/25/__trashed/) in practice there's not a big difference between signed and signed hybrid adjacencies because you end up elevating the values to a certain power, which in both cases moves the negative correlations to nearly zero. 
+
+Selected the signed hybrid adgacency.
+
+<br><br>
+
+## 2. Obtain an approximately scale-free topology
+
+<br>
+
+There are two functions that can be applied to the similarity matrix so the resulting network approximates a scale-free topology:
+
+a) Sigmoid function: $a(i,j)=sigmoid(s_{ij}, \alpha, \tau_0) \equiv \frac{1}{1+e^{-\alpha(s_{ij}-\tau_0)}}$
+b) Power adjacency function: $a(i,j)=power(s_{ij}, \beta) \equiv |S_{ij}|^\beta$
+
+Chose power adjacency function over the sigmoid function because it has only one parameter to adjust and both methods are supposed to lead to very similar results if the parameters are chosen with the scale-free topology criterion.
+
+<br>
+
+Following the **scale-free topology criterion** because metabolic networks have been found to display approximate scale free topology
+
+1. Only consider those parameter values that lead to a network satisfying scale-free topology at least approximately, e.g. signed $R^2 > 0.80$
+
+**Note:** Including non-integer powers in the parameters. Integer powers are usually used for this but there's no reason why you can't use a non-integer power and you can get a lower power vector that is above the 0.8 threshold so you don't affect the data that much
+
+```{r best_power}
+allowWGCNAThreads()
+
+best_power = datExpr %>% t %>% pickSoftThreshold(powerVector = c(powerVector = c(1,2,seq(3,4,0.1))), RsquaredCut=0.8)
+```
+
+Best power for scale free topology: `r  best_power$powerEstimate`
+
+2. Create adjacency matrix using the power selected above and the sgined hybrid function
+
+```{r create_adj_mat}
+S_sft = datExpr %>% t %>% adjacency(type='signed hybrid', power=best_power$powerEstimate, corFnc='bicor')
+```
+
+<br><br>
+
+## 3. Create the Distance Matrix
+
+<br>
+
+Using the Generalised Topological Overlap Dissimilarity measure to calculate the distance between genes because it has been found to result in biologically meaningful modules
+
+```{r TOM}
+dissTOM = S_sft %>% TOMdist
+rownames(dissTOM) = rownames(S_sft)
+colnames(dissTOM) = colnames(S_sft)
+
+rm(S_sft)
+```
+
+<br><br>
+
+## 4. Create a hierarchical cluster tree
+
+<br>
+
+Using hierarchical clustering using average linkage on the TOM-based dissimilarity matrix
+
+```{r, fig.width=10}
+dend = dissTOM %>% as.dist %>% hclust(method='average')
+plot(dend, hang=0, labels=FALSE, main=NULL, sub='', xlab='')
+```
+
+If we were to use complete linkage, which is the default method for the `hclust` function, all the branches of the tree would be too high, which causes the branch cutting algorithm to struggle to discriminate between them
+
+```{r, fig.width=10}
+dend_complete = dissTOM %>% as.dist %>% hclust
+plot(dend_complete, hang=0, labels=FALSE, main=NULL, sub='', xlab='')
+
+rm(dend_complete)
+```
+
+<br><br>
+
+## 5. Cluster extraction
+
+<br>
+
+Instead of using a fixed height to cut the dendrogram into clusters, using a dynamic branch cutting approach taken from [Dynamic Tree Cut: in-depth description, tests and applications](https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/BranchCutting/Supplement.pdf)
+
+There are two algorithms that do this:
+
+a) Dynamic Tree algorithm: Iterative top-down algorithm
+
+```{r}
+modules_dt = cutreeDynamic(dend, method = 'tree', minClusterSize = 10)
+
+table(modules_dt) %>% data.frame %>% filter(modules_dt != 0) %>%
+  ggplot(aes(x=modules_dt, y=Freq)) + geom_bar(stat='identity', color = 'white', fill = '#009999') + 
+  xlab('Modules') + ylab('Number of genes') + 
+  theme_minimal() + theme(axis.ticks.x = element_blank(), axis.text.x = element_blank())
+```
+
+`r sum(modules_dt==0)` genes (`r round(100*mean(modules_dt==0))`%)  are left without a cluster
+
+```{r pca_plots, warning=FALSE, fig.width=8, fig.align='center'}
+
+pca = datExpr %>% prcomp
+
+plot_data = data.frame('ID'=rownames(datExpr), 'PC1' = pca$x[,1], 'PC2' = pca$x[,2], 
+                       'hasCluster' = modules_dt!=0) %>%
+            left_join(genes_info, by='ID') %>% mutate('hasSFARIScore'=gene.score!='Others') %>%
+            apply_labels(`gene-score`='SFARI Gene score', significant = 'Differentially Expressed', 
+                        hasCluster = 'Belongs to a Module', hasSFARIScore = 'Has a SFARI Score')
+
+p1 = plot_data %>% ggplot(aes(PC1, PC2, color=hasCluster)) + geom_point(alpha=0.2) + 
+  theme_minimal() + ggtitle('Genes are assigned to a cluster') + theme(legend.position='bottom')
+
+p2 = plot_data %>% ggplot(aes(PC1, PC2, color=significant)) + geom_point(alpha=0.2) + 
+  theme_minimal() + ggtitle('Genes found to be DE') + theme(legend.position='bottom')
+
+grid.arrange(p1, p2, nrow=1, top = 'Exploring unassigned genes using the Dynamic Tree algorithm')
+
+# plot_data %>% ggplot(aes(PC1, PC2, color=hasCluster)) + geom_point(alpha=0.2) + 
+#   theme_minimal() + xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1],1),'%)')) +
+#   ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2],1),'%)')) + 
+#   theme(legend.position = 'bottom') + labs(color='Assigned to a cluster ')
+
+rm(pca, p1, p2)
+```
+
+
+<br>
+`r round(100*sum(!plot_data$hasCluster & !plot_data$significant)/sum(!plot_data$hasCluster))`% of the genes that don't have a cluster are not differentially expressed
+
+```{r}
+cro(plot_data$significant, list(plot_data$hasCluster, total()))
+```
+
+<br>
+
+`r sum(plot_data$hasSFARIScore & !plot_data$hasCluster)` of the SFARI genes (~`r round(100*sum(plot_data$hasSFARIScore & !plot_data$hasCluster)/sum(plot_data$hasSFARIScore))`%) are not assigned to any cluster
+
+```{r}
+cro(plot_data$hasSFARIScore, list(plot_data$hasCluster, total()))
+```
+<br>
+
+
+<br>
+
+b) Dynamic Hybrid algorithm: Bottom-up algorithm
+
+```{r}
+modules_dh = cutreeDynamic(dend, minClusterSize = 10, distM = dissTOM)
+
+table(modules_dh) %>% data.frame %>% filter(modules_dh != 0) %>%
+  ggplot(aes(x=modules_dh, y=Freq)) + geom_bar(stat='identity', color = 'white', fill = '#009999') + 
+  xlab('Modules') + ylab('Number of genes') + 
+  theme_minimal() + theme(axis.ticks.x = element_blank(), axis.text.x = element_blank())
+```
+
+`r sum(modules_dh==0)` genes (`r round(100*mean(modules_dh==0),2)`%)  are left without a cluster
+
+<br><br>
+
+
+## 6. Merge similar clusters
+
+<br>
+
+
+
+```{r merge_modules_dynamic_tree, fig.width=10}
+
+# Calculate eigengenes
+MEList = datExpr %>% t %>% moduleEigengenes(colors = modules_dt)
+MEs = MEList$eigengenes
+
+# Calculate dissimilarity of module eigengenes
+MEDiss = 1-cor(MEs)
+
+# Cluster module eigengenes
+METree = hclust(as.dist(MEDiss), method = 'average')
+
+METree %>% as.dendrogram %>% plot(leaflab = 'none')
+abline(h=0.4, col='#009999')
+
+merge_top_dt = datExpr %>% t %>% mergeCloseModules(modules_dt, cutHeight = 1)
+merge_similar_dt = datExpr %>% t %>% mergeCloseModules(modules_dt, cutHeight = 0.4)
+
+table(merge_similar_dt$colors) %>% data.frame %>% filter(Var1 != 0) %>%
+  ggplot(aes(x=reorder(Var1, -Freq), y=Freq)) + geom_bar(stat='identity', color = 'white', fill = '#009999') + 
+  xlab('Modules') + ylab('Number of genes') + 
+  theme_minimal() + theme(axis.ticks.x = element_blank(), axis.text.x = element_blank())
+
+rm(MEList, MEs, MEDiss, METree)
+```
+
+Followin Gandal's pipeline, we won't merge similar clusters.
+
+```{r merge_modules_dynamic_hybrid, fig.width=10}
+
+# Calculate eigengenes
+MEList = datExpr %>% t %>% moduleEigengenes(colors = modules_dh)
+MEs = MEList$eigengenes
+
+# Calculate dissimilarity of module eigengenes
+MEDiss = 1-cor(MEs)
+
+# Cluster module eigengenes
+METree = hclust(as.dist(MEDiss), method = 'average')
+
+METree %>% as.dendrogram %>% plot(leaflab = 'none')
+
+merge_top_dh = datExpr %>% t %>% mergeCloseModules(modules_dh, cutHeight = 1)
+
+rm(MEList, MEs, MEDiss, METree)
+```
+
+<br><br>
+
+Clustering comparison on dendrogram:
+
+Classification in the Dynamic Hybrid algorithm is a bit noisy with respect to the dendrogram, but that isn't necessarily a bad thing, as Peter Langfelder explains in [this blog post ](https://peterlangfelder.com/2018/12/30/why-wgcna-modules-dont-always-agree-with-the-dendrogram/) from [Insights from a Million Correlations](https://peterlangfelder.com/articles/)
+
+Here it's clear we should use the Dynamic Hybrid algorithm, since the Dynamic Tree loses too many genes.
+
+```{r dendro_with_all_clusterings, fig.width=10}
+
+dend_colors_all = data.frame('ID' = rownames(datExpr),
+                          'cl_dh' = get_mod_colours(modules_dh)[as.character(modules_dh)],
+                         'top_dh' = get_mod_colours(merge_top_dh$colors)[as.character(merge_top_dh$colors)],
+                         'dh' = rep('white', nrow(datExpr)),
+                         'cl_dt' = get_mod_colours(merge_similar_dt$colors)[as.character(merge_similar_dt$colors)],
+                         'top_dt' = get_mod_colours(merge_top_dt$colors)[as.character(merge_top_dt$colors)],
+                         'dt' = rep('white', nrow(datExpr)))
+
+dend %>% as.dendrogram(hang=0) %>% plot(ylim=c(min(dend$height),1), leaflab='none')
+colored_bars(colors=dend_colors_all[dend$order,-1], cex.rowLabels = 0.8, text_shift = 0,
+             rowLabels = rev(c('Dynamic Tree:','Top clusters', 'Clusters', 'Dynamic Hybrid:', 'Top clusters', 
+                               'Clusters')))
+
+```
+<br><br>
+
+---
+
+#### Save results
+
+```{r}
+
+dt_info = data.frame('ID' = rownames(datExpr),
+                     'Modules_dt' = get_mod_colours(modules_dt)[as.character(modules_dt)],
+                     'Merged_dt' = get_mod_colours(merge_similar_dt$colors)[as.character(merge_similar_dt$colors)],
+                     'Top_dt' = get_mod_colours(merge_top_dt$colors)[as.character(merge_top_dt$colors)])
+
+dh_info = data.frame('ID' = rownames(datExpr),
+                     'Modules_dh' = get_mod_colours(modules_dh)[as.character(modules_dh)],
+                     'Top_dh' = get_mod_colours(merge_top_dh$colors)[as.character(merge_top_dh$colors)])
+
+clusters = dt_info %>% left_join(dh_info, by='ID') %>% lapply(function(x) gsub('white','gray',x))
+
+write.csv(clusters, file='./../Data/preprocessedData/clusters.csv', row.names=FALSE)
+
+#save(dend, file = './../Data/preprocessedData/dendrogram.RData')
+# save(dissTOM, file = './../Data/preprocessedData/dissTOM.RData') # A bit heavy and probably won't need it (maybe for Chapter 5, if it exists)
+```
+<br><br>
+
+---
+
+#### Session info
+```{r print_session_info}
+sessionInfo()
+```
+<br><br>

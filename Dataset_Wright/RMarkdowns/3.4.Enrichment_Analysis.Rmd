@@ -1,0 +1,894 @@
+---
+title: '3.4 Enrichment Analysis'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+<br>
+
+#### Load R packages and define colour functions
+```{r load_packages, warning=FALSE, message=FALSE}
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly) ; library(dendextend)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(colorspace) ; library(corrplot)
+library(GGally) ; library(ggpubr) ; library(ggExtra)
+library(WGCNA)
+library(expss)
+library(polycor)
+library(biomaRt)
+library(clusterProfiler) ; library(ReactomePA) ; library(DOSE) ; library(org.Hs.eg.db)
+library(foreach) ; library(doParallel)
+library(knitr) ; library(kableExtra) ; library(xtable)
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+
+# Get colors from the ggplot palette
+gg_colour_hue = function(n) {
+  hues = seq(15, 375, length = n+1)
+  pal = hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+# Assign an HCL rainbow colour to each module
+get_mod_colours = function(mods){
+  
+  n = length(unique(mods))-1
+  set.seed(123) ; rand_order = sample(1:n)
+  mod_colors = c('white', gg_colour_hue(n)[rand_order])
+  names(mod_colors) = mods %>% table %>% names
+  
+  return(mod_colors)
+}
+
+# Compare results from GSEA and ORA
+compare_methods = function(GSEA_list, ORA_list, top_modules_enrichment, top_modules, database){
+
+  for(module in top_modules){
+    cat(paste0('  \n  \n Enrichment results for cluster ', 
+                 genes_info$module_number[genes_info$Module==module][1], ':  \n'))
+    
+    cat(paste0('- GSEA has ', nrow(GSEA_list[[module]][[database]]@result), ' enriched term(s)  \n'))
+    cat(paste0('- ORA has  ', nrow(ORA_list[[module]][[database]]@result), ' enriched term(s)  \n'))
+    cat(paste0('- ', nrow(top_modules_enrichment[[module]][[database]]), 
+               ' terms are enriched in both methods  \n  \n'))
+
+    enriched_terms = top_modules_enrichment[[module]][[database]] %>%
+                     dplyr::select(ID, Description.x, p.adjust_ORA, p.adjust_GSEA, qvalue_ORA, GeneRatio) %>%
+                     dplyr::rename('Description' = Description.x)
+    
+    if(nrow(enriched_terms)>0){
+      print(enriched_terms %>% mutate(pval_mean = p.adjust_ORA + p.adjust_GSEA) %>% 
+                          arrange(pval_mean) %>% dplyr::select(-pval_mean) %>% 
+            kable %>% kable_styling(full_width = F))
+      
+      ##########################################################################################################
+      # Get genes involved
+      genes = c()
+      i=1
+      for(row_genes in top_modules_enrichment[[module]][[database]] %>% pull(geneID)){
+        genes = c(genes, strsplit(row_genes,'/') %>% unlist) %>% unique
+        if(i==5){
+          cat(paste0('Genes involved in top 5 enriched terms: ',
+                     paste(gene_names %>% filter(entrezgene %in% genes) %>% pull(hgnc_symbol) %>% unique %>% 
+                           sort, collapse = ', '),'\n'))
+        }
+        i = i+1
+      }
+      
+      if(i != 5){
+        genes = gene_names %>% filter(entrezgene %in% genes) %>% pull(hgnc_symbol) %>% unique %>% sort
+        cat(paste0('\nGenes involved in all enriched terms: ', paste(genes, collapse = ', ')))  
+      }
+      ##########################################################################################################
+    }
+    
+  }
+}
+
+plot_results = function(top_modules_enrichment, top_modules, database){
+  
+  l = htmltools::tagList()
+
+  for(i in 1:length(top_modules)){
+    
+    plot_data = top_modules_enrichment[[top_modules[i]]][[database]] %>%
+                dplyr::rename('Description' = Description.x)
+    
+    if(nrow(plot_data)>5){
+      min_val = min(min(plot_data$p.adjust_GSEA), min(plot_data$p.adjust_ORA))
+      max_val = max(max(max(plot_data$p.adjust_GSEA), max(plot_data$p.adjust_ORA)), 0.05)
+      ggp = ggplotly(plot_data %>% ggplot(aes(p.adjust_GSEA, p.adjust_ORA, color = NES)) + 
+                     geom_point(aes(id = Description)) + 
+                     geom_vline(xintercept = 0.05, color = 'gray', linetype = 'dotted') + 
+                     geom_hline(yintercept = 0.05, color = 'gray', linetype = 'dotted') + 
+                     ggtitle(paste0('Enriched terms in common for cluster ', 
+                                    genes_info$module_number[genes_info$Module==top_modules[i]][1])) +
+                     scale_x_continuous(limits = c(min_val, max_val)) + 
+                     scale_y_continuous(limits = c(min_val, max_val)) + 
+                     xlab('Corrected p-value for GSEA') + ylab('Corrected p-value for ORA') +
+                     scale_colour_viridis(direction = -1) + theme_minimal() + coord_fixed())
+      l[[i]] = ggp
+    }
+  }
+  
+  return(l)
+}
+
+
+# plot_shared_genes(top_modules_enrichment, top_modules, 'GO')
+plot_shared_genes = function(top_modules_enrichment, top_modules, database){
+
+  for(tm in 1:length(top_modules)){
+    
+    plot_data = top_modules_enrichment[[top_modules[tm]]][[database]] %>% 
+                mutate(pval_mean = p.adjust_ORA + p.adjust_GSEA) %>% arrange(pval_mean) %>% 
+                dplyr::select(ID, geneID)
+    
+    if(nrow(plot_data)>=2){
+
+      plot_data = plot_data %>% slice_head(n=5)
+    
+      shared_genes = matrix(0, nrow(plot_data), nrow(plot_data))
+      for(i in 1:(nrow(plot_data)-1)){
+        for(j in (i+1):nrow(plot_data)){
+          gene_set_1 = strsplit(plot_data$geneID[i], '/') %>% unlist
+          gene_set_2 = strsplit(plot_data$geneID[j], '/') %>% unlist
+          shared_genes[i,j] = sum(gene_set_1 %in% gene_set_2)/length(unique(c(gene_set_1, gene_set_2)))
+          shared_genes[j,i] = shared_genes[i,j]
+        }
+      }
+      rownames(shared_genes) = plot_data$ID
+      colnames(shared_genes) = plot_data$ID
+  
+      corrplot(shared_genes, type = 'lower', method = 'square', diag = FALSE, number.digits = 2, cl.pos = 'n', 
+               tl.pos = 'ld', tl.col = '#666666', order = 'hclust', col.lim = c(0,1), addCoef.col = 'black',
+               mar = c(0,0,2,0), tl.cex = 0.8, number.cex= 0.8,
+               title = paste0('Genes in common for top terms in cluster ',
+                              genes_info$module_number[genes_info$Module==top_modules[tm]][1]))
+    }
+  }
+}
+
+# Print table with top results (for annex in thesis)
+print_table_w_top_results = function(top_modules_enrichment, module, database, n){
+  
+  enriched_terms = top_modules_enrichment[[module]][[database]] %>%
+                   mutate(pval_mean = p.adjust_ORA + p.adjust_GSEA) %>% arrange(pval_mean) %>%
+                   top_n(-n, wt=pval_mean) %>% dplyr::rename('Description' = Description.x) %>%
+                   dplyr::select(ID, Description, p.adjust_GSEA, p.adjust_ORA, NES, GeneRatio) %>%
+                   xtable(display =c('s','s','s','e','e','f','s'))
+
+  return(print(enriched_terms, include.rownames=FALSE))
+}
+
+#print_table_w_top_results(selected_modules_enrichment, names(selected_modules_enrichment)[2], 'DN', 5)
+
+```
+
+#### Load preprocessed dataset (code in 2.1.Preprocessing_pipeline.Rmd)
+
+```{r load_dataset, echo=TRUE, message=FALSE, warning=FALSE}
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../SFARI/Data/SFARI_genes_01-03-2020_w_ensembl_IDs.csv')
+
+# Load Gandal dataset
+load('./../Data/preprocessedData/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+
+# WGCNA metrics
+WGCNA_metrics = read.csv('./../Data/preprocessedData/WGCNA_metrics.csv')
+
+# Updates genes_info with SFARI information and clusters
+genes_info = genes_info %>% left_join(SFARI_genes, by = 'ID') %>% 
+             left_join(datGenes %>% mutate(ID = ensembl_gene_id) %>% dplyr::select(ID, hgnc_symbol), by = 'ID') %>%
+             dplyr::select(ID, hgnc_symbol, log2FoldChange, shrunken_log2FoldChange, significant, Neuronal) %>%
+             left_join(WGCNA_metrics, by = 'ID') %>% dplyr::select(-contains('pval'))
+
+
+################################################################################################################
+# Get entrezene ID of genes
+gene_names = genes_info %>% dplyr::rename('ensembl_gene_id' = ID) %>% filter(Module!='gray')
+  
+# ClusterProfile works with Entrez Gene Ids, o we have to assign one to each gene
+getinfo = c('ensembl_gene_id','entrezgene')
+mart=useMart(biomart='ENSEMBL_MART_ENSEMBL',dataset='hsapiens_gene_ensembl',host='feb2014.archive.ensembl.org')
+biomart_output = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), 
+                       values=gene_names$ensembl_gene_id, mart=mart)
+
+gene_names = biomart_output %>% left_join(gene_names %>% dplyr::select(ensembl_gene_id, hgnc_symbol), 
+                                          by='ensembl_gene_id') %>% dplyr::rename('ID'=ensembl_gene_id)
+
+rm(getinfo, mart, biomart_output)
+
+
+
+rm(dds, WGCNA_metrics)
+```
+<br>
+
+------
+
+<br>
+
+## Methodology
+
+Both GSEA and ORA are commonly used to study enrichment in sets of genes, but when using them for studying our modules both have shortcomings:
+
+- **GSEA** takes into consideration some ordering of the genes, in this case given by their Module Membership, which is correlated to the membership of genes to the module, but has two problems:
+
+  - Being a continuous scale, it doesn't separate by a threshold the genes that are truly in the cluster from the rest
+  
+  - The Module Membership metric is correlated to the real membership of the module, but this correlation is not perfect: a high MM doesn't always mean the gene belongs to that module, for example, selecting a random module, in the plot below we can see the MM distribution of genes belonging to that module against the rest of the genes belonging to other modules and, although in general, genes belonging to that module have a higher distribution of MM, there is still a big overlap between the two groups, making MM a noisy metric for performing GSEA 
+  
+```{r warning=FALSE, message=FALSE, fig.width=8, fig.height=3, fig.align='center'}
+module = genes_info %>% filter(abs(MTcor) > 0.7) %>% slice_head(n=1) %>% pull(Module) %>% as.character
+
+plot_data = genes_info %>% dplyr::select(Module, paste0('MM.',gsub('#','',module))) %>% 
+            mutate(in_module = substring(Module,2) == gsub('#','',module), 
+                   selected_module = paste('Cluster', genes_info$module_number[genes_info$Module==module][1] %>% 
+                                             as.character)) %>%
+            mutate(alpha = ifelse(in_module, 0.8, 0.1))
+colnames(plot_data)[2] = 'MM'
+
+p = plot_data %>% ggplot(aes(selected_module, MM, color = in_module)) + geom_jitter(alpha = plot_data$alpha) + 
+    xlab('') + ylab(paste('Cluster membership to cluster', 
+                          genes_info$module_number[genes_info$Module==module][1])) + coord_flip() + 
+    theme_minimal() + theme(legend.position = 'bottom', axis.text.y = element_blank(),
+                            axis.ticks.y = element_blank()) + 
+    labs(color = paste('Gene belongs to cluster', genes_info$module_number[genes_info$Module==module][1]))
+
+ggExtra::ggMarginal(p, type = 'density', groupColour = TRUE, groupFill = TRUE, margins = 'x', size=1)
+
+rm(modules, module, p, plot_data)
+```
+
+- **ORA** doesn't rank the genes within the cluster, but considers them all together, so if you have an enrichment only in the most important genes in the module, it will probably be diluted by the rest of the not so important genes and ORA won't be able to identify it
+
+So perhaps it could be useful to use both methods together, since they seem to complement each other's shortcomings very well, performing the enrichment using both methods and identifying the terms that are found to be enriched by both
+
+**Note:** Since the enrichment in both methods is quite a stric restriction, we decide to relax the corrected p-value threshold (using Bonferroni correction) to 0.1.
+
+<br>
+
+### Perform Enrichment Analysis
+
+**Note:** This script may take a bit to run (~30 mins with an 8 core Intel(R) Core(TM) i5-8400H CPU @ 2.50GHz laptop) and sometimes there are problems with the API and it will freeze or kill the process printing 'error writing to connection', but this when this has happened, it has been fixed in less than a day (except once that took 4 days...).
+
+```{r enrichment_analysis, warning=FALSE, message=FALSE}
+
+# Modules: 37, 49, 28, 35, 57, 70
+top_modules = c('#4A9FFF','#9AA800','#00C0B4','#32B600','#BA9E00','#DF8B00')
+
+if(file.exists('./../Data/preprocessedData/top_modules_enrichment.RData')){
+  load('./../Data/preprocessedData/top_modules_enrichment.RData')
+  load('./../Data/preprocessedData/GSEA_results.RData')
+  load('./../Data/preprocessedData/ORA_results.RData')
+} else{
+    
+  ################################################################################################################
+  # Prepare dataset for Enrichment Analysis
+  
+  EA_dataset = genes_info %>% dplyr::rename('ensembl_gene_id' = ID) %>% filter(Module!='gray')
+  
+  # ClusterProfile works with Entrez Gene Ids, o we have to assign one to each gene
+  getinfo = c('ensembl_gene_id','entrezgene')
+  mart=useMart(biomart='ENSEMBL_MART_ENSEMBL',dataset='hsapiens_gene_ensembl',host='feb2014.archive.ensembl.org')
+  biomart_output = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), 
+                         values=EA_dataset$ensembl_gene_id, mart=mart)
+  
+  EA_dataset = biomart_output %>% left_join(EA_dataset, by='ensembl_gene_id') %>% dplyr::rename('ID'=ensembl_gene_id)
+  
+  rm(getinfo, mart, biomart_output)
+  
+  ################################################################################################################
+  # GSEA enrichment
+  
+  file_name = './../Data/preprocessedData/GSEA_results.RData'
+  if(file.exists(file_name)){
+    load(file_name)
+  } else {
+    nPerm = 1e5
+    GSEA_dataset = EA_dataset %>% dplyr::select(ID, entrezgene, contains('MM.'))
+    GSEA_enrichment = list()
+    
+    for(module in top_modules){
+      
+      cat(paste0('\nModule: ', which(top_modules == module), '/', length(top_modules)))
+      
+      geneList = GSEA_dataset %>% pull(paste0('MM.',substring(module,2)))
+      names(geneList) = GSEA_dataset %>% pull(entrezgene) %>% as.character
+      geneList = sort(geneList, decreasing = TRUE)
+      
+      GSEA_GO = gseGO(geneList, OrgDb = org.Hs.eg.db, pAdjustMethod = 'bonferroni', pvalueCutoff = 0.1, 
+                      nPerm = nPerm, verbose = FALSE, seed = TRUE)
+      
+      GSEA_DO = gseDO(geneList, pAdjustMethod = 'bonferroni', pvalueCutoff = 0.1, 
+                      nPerm = nPerm, verbose = FALSE, seed = TRUE)
+      
+      GSEA_DGN = gseDGN(geneList, pAdjustMethod = 'bonferroni', pvalueCutoff = 0.1, 
+                        nPerm = nPerm, verbose = FALSE, seed = TRUE)
+      
+      GSEA_KEGG = gseKEGG(geneList, organism = 'human', pAdjustMethod = 'bonferroni', pvalueCutoff = 0.1, 
+                          nPerm = nPerm, verbose = FALSE, seed = TRUE)
+      
+      GSEA_Reactome = gsePathway(geneList, organism = 'human', pAdjustMethod = 'bonferroni', pvalueCutoff = 0.1, 
+                                 nPerm = nPerm, verbose = FALSE, seed = TRUE)
+      
+      GSEA_enrichment[[module]] = list('GO' = GSEA_GO, 'DO' = GSEA_DO, 'DGN' = GSEA_DGN, 'KEGG' = GSEA_KEGG, 
+                                       'Reactome' = GSEA_Reactome)
+      
+      # Save after each iteration (in case it breaks)
+      save(GSEA_enrichment, file = file_name)
+    }
+    
+    rm(GSEA_dataset, nPerm, geneList, GSEA_GO, GSEA_DO, GSEA_DGN, GSEA_KEGG, GSEA_Reactome)
+    
+  }
+  
+  ################################################################################################################
+  # ORA enrichment
+  
+  file_name = './../Data/preprocessedData/ORA_results.RData'
+  if(file.exists(file_name)){
+    load(file_name)
+  } else {
+    # Prepare input
+    universe = EA_dataset$entrezgene %>% as.character
+    
+    # Perform Enrichment
+    ORA_enrichment = list()
+    
+    for(module in top_modules){
+      
+      genes_in_module = EA_dataset %>% filter(Module == module) %>% pull(entrezgene)
+      
+      ORA_GO = enrichGO(gene = genes_in_module, universe = universe, OrgDb = org.Hs.eg.db, ont = 'All', 
+                        pAdjustMethod = 'bonferroni', pvalueCutoff = 0.1, qvalueCutoff = 1)
+      
+      ORA_DO = enrichDO(gene = genes_in_module, universe = universe, qvalueCutoff = 1,
+                        pAdjustMethod = 'bonferroni', pvalueCutoff = 0.1)
+      
+      ORA_DGN = enrichDGN(gene = genes_in_module, universe = universe, qvalueCutoff = 1,
+                          pAdjustMethod = 'bonferroni', pvalueCutoff = 0.1)
+      
+      ORA_KEGG = enrichKEGG(gene = genes_in_module, universe = universe, qvalueCutoff = 1,
+                            pAdjustMethod = 'bonferroni', pvalueCutoff = 0.1) 
+      
+      ORA_Reactome = enrichPathway(gene = genes_in_module, universe = universe, qvalueCutoff = 1,
+                                   pAdjustMethod = 'bonferroni', pvalueCutoff = 0.1)
+      
+      ORA_enrichment[[module]] = list('GO' = ORA_GO, 'DO' = ORA_DO, 'DGN' = ORA_DGN, 'KEGG' = ORA_KEGG, 
+                                      'Reactome' = ORA_Reactome)
+      
+      # Save after each iteration
+      save(ORA_enrichment, file = file_name)
+    }
+    
+    rm(universe, genes_in_module, module, ORA_GO, ORA_DGN, ORA_DO, ORA_KEGG, ORA_Reactome)
+  
+  }
+  
+  ################################################################################################################
+  # Get shared enrichment for each module
+  
+  top_modules_enrichment = list()
+  
+  for(module in top_modules){
+    
+    module_enrichment = list()
+    GSEA_enrichment_for_module = GSEA_enrichment[[module]]
+    ORA_enrichment_for_module = ORA_enrichment[[module]]
+    
+    for(dataset in c('KEGG', 'Reactome', 'GO', 'DO', 'DGN')){
+      
+      GSEA_enrichment_dataset = GSEA_enrichment_for_module[[dataset]] %>% data.frame %>%
+        dplyr::rename('pvalue_GSEA' = pvalue, 'p.adjust_GSEA' = p.adjust, 'qvalues_GSEA' = qvalues)
+      
+      ORA_enrichment_dataset = ORA_enrichment_for_module[[dataset]] %>% data.frame %>%
+        dplyr::rename('pvalue_ORA' = pvalue, 'p.adjust_ORA' = p.adjust, 'qvalue_ORA' = qvalue)
+      
+      # Get shared enrichments (if any)
+      shared_enrichment_dataset = GSEA_enrichment_dataset %>% inner_join(ORA_enrichment_dataset, by = 'ID')
+      
+      module_enrichment[[dataset]] = shared_enrichment_dataset
+    }
+    
+    top_modules_enrichment[[module]] = module_enrichment  
+  }
+  
+  save(top_modules_enrichment, file = './../Data/preprocessedData/top_modules_enrichment.RData')
+  
+  rm(module, module_enrichment, GSEA_enrichment_for_module, ORA_enrichment_for_module, dataset, 
+     GSEA_enrichment_dataset, ORA_enrichment_dataset, shared_enrichment_dataset)
+}
+```
+
+------
+
+<br>
+
+# 3.4.1 Top clusters by cluster-diagnosis correlation
+
+<br>
+
+Neither cluster is enriched in any of the databases
+
+<br>
+```{r}
+top_modules_mtcor = top_modules[1:2]
+```
+<br>
+
+### Gene Ontology
+
+```{r GO, results = 'asis'}
+
+compare_methods(GSEA_enrichment, ORA_enrichment, top_modules_enrichment, top_modules_mtcor, 'GO')
+
+```
+<br>
+
+### Disease Ontology
+
+```{r DO, results = 'asis'}
+
+compare_methods(GSEA_enrichment, ORA_enrichment, top_modules_enrichment, top_modules_mtcor, 'DO')
+
+```
+<br>
+
+### Disease Gene Network
+
+```{r DGN, results = 'asis'}
+
+compare_methods(GSEA_enrichment, ORA_enrichment, top_modules_enrichment, top_modules_mtcor, 'DGN')
+
+```
+<br>
+
+### KEGG
+
+```{r KEGG, results = 'asis'}
+
+compare_methods(GSEA_enrichment, ORA_enrichment, top_modules_enrichment, top_modules_mtcor, 'KEGG')
+
+```
+<br>
+
+### Reactome
+
+```{r Reactome, results = 'asis'}
+
+compare_methods(GSEA_enrichment, ORA_enrichment, top_modules_enrichment, top_modules_mtcor, 'Reactome')
+
+```
+
+<br><br>
+
+------
+
+<br>
+
+
+# 3.4.2 Top clusters by enrichment in SFARI Genes
+
+<br>
+
+```{r}
+top_modules_SFARI = top_modules[3:6]
+
+```
+
+<br>
+
+### Gene Ontology
+
+```{r GO_SFARI, results = 'asis'}
+
+compare_methods(GSEA_enrichment, ORA_enrichment, top_modules_enrichment, top_modules_SFARI, 'GO')
+
+```
+<br>
+
+
+### Disease Ontology
+
+```{r DO_SFARI, results = 'asis'}
+
+compare_methods(GSEA_enrichment, ORA_enrichment, top_modules_enrichment, top_modules_SFARI, 'DO')
+
+```
+<br>
+
+### Disease Gene Network
+
+```{r DGN_SFARI, results = 'asis'}
+
+compare_methods(GSEA_enrichment, ORA_enrichment, top_modules_enrichment, top_modules_SFARI, 'DGN')
+
+```
+
+<br>
+
+### KEGG
+
+```{r KEGG_SFARI, results = 'asis'}
+
+compare_methods(GSEA_enrichment, ORA_enrichment, top_modules_enrichment, top_modules_SFARI, 'KEGG')
+
+```
+<br>
+
+### Reactome
+
+```{r Reactome_SFARI, results = 'asis'}
+
+compare_methods(GSEA_enrichment, ORA_enrichment, top_modules_enrichment, top_modules_SFARI, 'Reactome')
+
+```
+<br>
+
+<br><br>
+
+------
+------
+
+<br>
+
+## Relaxing restrictions for clusters that weren't enriched in any term
+
+```{r}
+
+# Get cluster name for clusters with numbers 37 and 49
+selected_modules = c(genes_info %>% filter(module_number==37) %>% slice_head(1) %>% pull(Module) %>% as.character,
+                     genes_info %>% filter(module_number==49) %>% slice_head(1) %>% pull(Module) %>% as.character)
+
+if(file.exists('./../Data/preprocessedData/top_modules_enrichment_relaxed.RData')){
+  load('./../Data/preprocessedData/top_modules_enrichment_relaxed.RData')
+  load('./../Data/preprocessedData/GSEA_results_relaxed.RData')
+  load('./../Data/preprocessedData/ORA_results_relaxed.RData')
+} else{
+
+  pvalueCutoff = 0.5
+  ################################################################################################################
+  # Prepare dataset for Enrichment Analysis
+  
+  EA_dataset = genes_info %>% dplyr::rename('ensembl_gene_id' = ID) %>% filter(Module!='gray')
+  
+  # ClusterProfile works with Entrez Gene Ids, o we have to assign one to each gene
+  getinfo = c('ensembl_gene_id','entrezgene')
+  mart=useMart(biomart='ENSEMBL_MART_ENSEMBL',dataset='hsapiens_gene_ensembl',host='feb2014.archive.ensembl.org')
+  biomart_output = getBM(attributes=getinfo, filters=c('ensembl_gene_id'), 
+                         values=EA_dataset$ensembl_gene_id, mart=mart)
+  
+  EA_dataset = biomart_output %>% left_join(EA_dataset, by='ensembl_gene_id') %>% 
+               dplyr::rename('ID'=ensembl_gene_id) %>% distinct(entrezgene, .keep_all = TRUE)
+  
+  rm(getinfo, mart, biomart_output)
+  
+  ################################################################################################################
+  # GSEA enrichment
+  
+  file_name = './../Data/preprocessedData/GSEA_results_relaxed.RData'
+  if(file.exists(file_name)){
+    load(file_name)
+  } else {
+    cat('\n\nPerforming GSEA\n')
+    
+    nPerm = 1e5
+    GSEA_dataset = EA_dataset %>% dplyr::select(ID, entrezgene, contains('MM.'))
+    GSEA_enrichment = list()
+    
+    for(module in selected_modules){
+      
+      cat(paste0('\nModule: ', which(selected_modules == module), '/', length(selected_modules)))
+      
+      geneList = GSEA_dataset %>% pull(paste0('MM.',substring(module,2)))
+      names(geneList) = GSEA_dataset %>% pull(entrezgene) %>% as.character
+      geneList = sort(geneList, decreasing = TRUE)
+      
+      GSEA_GO = gseGO(geneList, OrgDb = org.Hs.eg.db, pAdjustMethod = 'bonferroni', pvalueCutoff = pvalueCutoff, 
+                      nPerm = nPerm, verbose = FALSE, seed = TRUE)
+      
+      GSEA_DO = gseDO(geneList, pAdjustMethod = 'bonferroni', pvalueCutoff = pvalueCutoff, 
+                      nPerm = nPerm, verbose = FALSE, seed = TRUE)
+      
+      GSEA_DGN = gseDGN(geneList, pAdjustMethod = 'bonferroni', pvalueCutoff = pvalueCutoff, 
+                        nPerm = nPerm, verbose = FALSE, seed = TRUE)
+      
+      GSEA_KEGG = gseKEGG(geneList, organism = 'human', pAdjustMethod = 'bonferroni', pvalueCutoff = pvalueCutoff, 
+                          nPerm = nPerm, verbose = FALSE, seed = TRUE)
+      
+      GSEA_Reactome = gsePathway(geneList, organism = 'human', pAdjustMethod = 'bonferroni', pvalueCutoff = pvalueCutoff, 
+                                 nPerm = nPerm, verbose = FALSE, seed = TRUE)
+      
+      GSEA_enrichment[[module]] = list('GO' = GSEA_GO, 'DO' = GSEA_DO, 'DGN' = GSEA_DGN, 'KEGG' = GSEA_KEGG, 
+                                       'Reactome' = GSEA_Reactome)
+      
+      # Save after each iteration (in case it breaks)
+      save(GSEA_enrichment, file = file_name)
+    }
+    
+    rm(GSEA_dataset, nPerm, geneList, GSEA_GO, GSEA_DO, GSEA_DGN, GSEA_KEGG, GSEA_Reactome)
+    
+  }
+  
+  ################################################################################################################
+  # ORA enrichment
+  
+  file_name = './../Data/preprocessedData/ORA_results_relaxed.RData'
+  if(file.exists(file_name)){
+    load(file_name)
+  } else {
+    cat('\n\nPerforming ORA\n')
+    
+    # Prepare input
+    universe = EA_dataset$entrezgene %>% as.character
+    
+    # Perform Enrichment
+    ORA_enrichment = list()
+    
+    for(module in selected_modules){
+      
+      cat(paste0('\nModule: ', which(selected_modules == module), '/', length(selected_modules)))
+      
+      genes_in_module = EA_dataset %>% filter(Module == module) %>% pull(entrezgene)
+      
+      ORA_GO = enrichGO(gene = genes_in_module, universe = universe, OrgDb = org.Hs.eg.db, ont = 'All', 
+                        pAdjustMethod = 'bonferroni', pvalueCutoff = pvalueCutoff, qvalueCutoff = 1)
+      
+      ORA_DO = enrichDO(gene = genes_in_module, universe = universe, qvalueCutoff = 1,
+                        pAdjustMethod = 'bonferroni', pvalueCutoff = pvalueCutoff)
+      
+      ORA_DGN = enrichDGN(gene = genes_in_module, universe = universe, qvalueCutoff = 1,
+                          pAdjustMethod = 'bonferroni', pvalueCutoff = pvalueCutoff)
+      
+      ORA_KEGG = enrichKEGG(gene = genes_in_module, universe = universe, qvalueCutoff = 1,
+                            pAdjustMethod = 'bonferroni', pvalueCutoff = pvalueCutoff) 
+      
+      ORA_Reactome = enrichPathway(gene = genes_in_module, universe = universe, qvalueCutoff = 1,
+                                   pAdjustMethod = 'bonferroni', pvalueCutoff = pvalueCutoff)
+      
+      ORA_enrichment[[module]] = list('GO' = ORA_GO, 'DO' = ORA_DO, 'DGN' = ORA_DGN, 'KEGG' = ORA_KEGG, 
+                                      'Reactome' = ORA_Reactome)
+      
+      # Save after each iteration (in case it breaks)
+      save(ORA_enrichment, file = file_name)
+    }
+    
+    rm(universe, genes_in_module, module, ORA_GO, ORA_DGN, ORA_DO, ORA_KEGG, ORA_Reactome)
+  
+  }
+  
+  ################################################################################################################
+  # Get shared enrichment for each module
+  
+  selected_modules_enrichment = list()
+  
+  for(module in selected_modules){
+    
+    module_enrichment = list()
+    GSEA_enrichment_for_module = GSEA_enrichment[[module]]
+    ORA_enrichment_for_module = ORA_enrichment[[module]]
+    
+    for(dataset in c('KEGG', 'Reactome', 'GO', 'DO', 'DGN')){
+      
+      GSEA_enrichment_dataset = GSEA_enrichment_for_module[[dataset]] %>% data.frame %>%
+        dplyr::rename('pvalue_GSEA' = pvalue, 'p.adjust_GSEA' = p.adjust, 'qvalues_GSEA' = qvalues)
+      
+      ORA_enrichment_dataset = ORA_enrichment_for_module[[dataset]] %>% data.frame %>%
+        dplyr::rename('pvalue_ORA' = pvalue, 'p.adjust_ORA' = p.adjust, 'qvalue_ORA' = qvalue)
+      
+      # Get shared enrichments (if any)
+      shared_enrichment_dataset = GSEA_enrichment_dataset %>% inner_join(ORA_enrichment_dataset, by = 'ID')
+      
+      module_enrichment[[dataset]] = shared_enrichment_dataset
+    }
+    
+    selected_modules_enrichment[[module]] = module_enrichment
+  }
+  
+  save(selected_modules_enrichment, file = './../Data/preprocessedData/top_modules_enrichment_relaxed.RData')
+  
+  rm(module, module_enrichment, GSEA_enrichment_for_module, ORA_enrichment_for_module, dataset, 
+     GSEA_enrichment_dataset, ORA_enrichment_dataset, shared_enrichment_dataset)
+}
+```
+
+Relaxing the p-value only worked for one of the modules, the other still has zero elements in common between the GSEA and ORA results
+
+<br>
+
+**Neither cluster is enriched in any term even with the relaxation of the p-value cutoff**
+
+<br>
+
+------
+------
+
+<br>
+
+## GSEA and ORA top enrichment results for cluster 37
+
+<br>
+
+**Note:** I am using a corrected p-value threhsold of 0.05, since the relaxation was only because we were combining these results with the ones from the ORA
+
+```{r}
+load('./../Data/preprocessedData/GSEA_results.RData')
+load('./../Data/preprocessedData/ORA_results.RData')
+
+print_GSEA_top_results = function(module, n){
+  
+  for(database in c('GO','DO','DGN','KEGG','Reactome')){
+      res = GSEA_enrichment[[module]][[database]]@result %>% filter(p.adjust<0.05 & NES>0) %>%
+            dplyr::select(ID, Description, NES, p.adjust, qvalues) %>% arrange(desc(NES)) %>% top_n(n, wt=NES)  
+      
+      cat(paste0('\n',database,':\n'))
+      
+      if(nrow(res)>0){
+        print(res %>% kable %>% kable_styling(full_width = F))  
+        #print(xtable(res, display =c('s','s','s','f','e','e')), include.rownames=FALSE) # thesis
+      } else { 
+        cat('\nNo enriched terms found\n\n\n')
+      }
+    
+  }
+}
+
+plot_shared_genes_GSEA = function(module, n){
+    for(database in c('GO','DO','DGN','KEGG','Reactome')){
+      plot_data = GSEA_enrichment[[module]][[database]]@result %>% filter(p.adjust<0.05 & NES>0) %>%
+                   arrange(desc(NES))
+      
+      if(nrow(plot_data)>1){
+        
+        plot_data = plot_data %>% dplyr::select(ID, core_enrichment) %>% slice_head(n=n) 
+      
+        shared_genes = matrix(0, nrow(plot_data), nrow(plot_data))
+        for(i in 1:(nrow(plot_data)-1)){
+          for(j in (i+1):nrow(plot_data)){
+            gene_set_1 = strsplit(plot_data$core_enrichment[i], '/') %>% unlist %>% unique
+            gene_set_2 = strsplit(plot_data$core_enrichment[j], '/') %>% unlist %>% unique
+            shared_genes[i,j] = sum(gene_set_1 %in% gene_set_2)/length(unique(c(gene_set_1, gene_set_2)))
+            shared_genes[j,i] = shared_genes[i,j]
+          }
+        }
+        rownames(shared_genes) = plot_data$ID
+        colnames(shared_genes) = plot_data$ID
+    
+        corrplot(shared_genes, type = 'lower', method = 'square', diag = FALSE, number.digits = 2, cl.pos = 'n', 
+                 tl.pos = 'ld', tl.col = '#666666', order = 'hclust', col.lim = c(0,1), addCoef.col = 'black',
+                 mar = c(0,0,2,0), tl.cex = 0.8, number.cex= 0.8,
+                 title = paste0('Genes in common in the ',database, ' database for cluster ',
+                                genes_info$module_number[genes_info$Module==module][1]))
+
+      }
+  }
+}
+
+print_ORA_top_results = function(module, n){
+  
+  for(database in c('GO','DO','DGN','KEGG','Reactome')){
+      res = ORA_enrichment[[module]][[database]]@result %>% filter(p.adjust<0.05) %>%
+            dplyr::select(ID, Description, p.adjust, qvalue, GeneRatio) %>% arrange(p.adjust) %>% 
+            top_n(n, wt=p.adjust)
+      
+      cat(paste0('\n',database,':\n'))
+      
+      if(nrow(res)>0){
+        print(res %>% kable %>% kable_styling(full_width = F))  
+        #print(xtable(res, display =c('s','s','s','e','e','s')), include.rownames=FALSE) # thesis
+      } else { 
+        cat('\nNo enriched terms found\n\n\n')
+      }
+    
+  }
+}
+
+plot_shared_genes_ORA = function(module, n){
+    for(database in c('GO','DO','DGN','KEGG','Reactome')){
+      plot_data = ORA_enrichment[[module]][[database]]@result %>% filter(p.adjust<0.05) %>%
+                  arrange(desc(p.adjust)) %>% dplyr::select(ID, geneID) %>% slice_head(n=n)
+      
+      if(nrow(plot_data)>1){
+    
+      shared_genes = matrix(0, nrow(plot_data), nrow(plot_data))
+      for(i in 1:(nrow(plot_data)-1)){
+        for(j in (i+1):nrow(plot_data)){
+          gene_set_1 = strsplit(plot_data$core_enrichment[i], '/') %>% unlist %>% unique
+          gene_set_2 = strsplit(plot_data$core_enrichment[j], '/') %>% unlist %>% unique
+          shared_genes[i,j] = sum(gene_set_1 %in% gene_set_2)/length(unique(c(gene_set_1, gene_set_2)))
+          shared_genes[j,i] = shared_genes[i,j]
+        }
+      }
+      rownames(shared_genes) = plot_data$ID
+      colnames(shared_genes) = plot_data$ID
+  
+      corrplot(shared_genes, type = 'lower', method = 'square', diag = FALSE, number.digits = 2, cl.pos = 'n', 
+               tl.pos = 'ld', tl.col = '#666666', order = 'hclust', col.lim = c(0,1), addCoef.col = 'black',
+               mar = c(0,0,2,0), tl.cex = 0.8, number.cex= 0.8,
+               title = paste0('Genes in common in the ',database, ' database for cluster ',
+                              genes_info$module_number[genes_info$Module==module][1]))
+
+      }
+  }
+}
+
+```
+
+<br>
+
+### GSEA enrichment results
+
+```{r warning=FALSE, message=FALSE, results = 'asis'}
+
+print_GSEA_top_results(selected_modules[1], 5)
+
+```
+<br>
+
+Plots of the results when there are more than 2 terms in common between methods:
+```{r, warning=FALSE, fig.width=6}
+
+plot_shared_genes_GSEA(selected_modules[1], 5)
+
+```
+
+<br><br>
+
+### ORA enrichment results
+
+```{r warning=FALSE, message=FALSE, results = 'asis'}
+
+print_ORA_top_results(selected_modules[1], 5)
+
+```
+
+<br>
+
+## GSEA and ORA top enrichment results for cluster 49
+
+<br>
+
+### GSEA enrichment results
+
+```{r warning=FALSE, message=FALSE, results = 'asis'}
+
+print_GSEA_top_results(selected_modules[2], 5)
+
+```
+<br>
+
+Plots of the results when there are more than 2 terms in common between methods:
+```{r, warning=FALSE, fig.width=6}
+
+plot_shared_genes_GSEA(selected_modules[2], 5)
+
+```
+
+<br><br>
+
+### ORA enrichment results
+
+```{r warning=FALSE, message=FALSE, results = 'asis'}
+
+print_ORA_top_results(selected_modules[2], 5)
+
+```
+
+
+<br><br>
+
+---
+
+<br>
+
+#### Session info
+
+```{r print_session_info}
+sessionInfo()
+```
+<br><br>
