@@ -460,8 +460,8 @@ ggplotly(enrichment_data %>% left_join(mean_expr_by_module, by = 'Module') %>%
 
 wt = plot_data %>% mutate(abs_GS = abs(GS), Group = factor(Group, levels = c('SFARI','Neuronal','Others'))) %>% 
      wilcox_test(abs_GS~Group, p.adjust.method='BH') %>% add_x_position(x = 'group')
-increase = 0.1
-base = 1.05
+increase = 0.07
+base = 0.7
 pos_y_comparisons = c(base, base + increase, base)
 
 p1 = plot_data %>% mutate(Group = factor(Group, levels = c('SFARI', 'Neuronal', 'Others'))) %>%
@@ -476,7 +476,7 @@ p1 = plot_data %>% mutate(Group = factor(Group, levels = c('SFARI', 'Neuronal', 
 wt = plot_data %>% mutate(abs_MTcor=abs(MTcor), Group=factor(Group, levels=c('SFARI','Neuronal','Others'))) %>% 
      wilcox_test(abs_MTcor~Group, p.adjust.method='BH') %>% add_x_position(x = 'group')
 increase = 0.08
-base = 1.05
+base = 0.8
 pos_y_comparisons = c(base, base + increase, base)
 
 p2 = plot_data %>% mutate(Group = factor(Group, levels = c('SFARI', 'Neuronal', 'Others'))) %>%
@@ -502,8 +502,8 @@ rm(p1, p2, increase, base, pos_y_comparisons, wt)
 comparisons = list(c('1','2'), c('2','3'), c('3','Neuronal'), c('Neuronal','Others'),
                    c('1','3'), c('3','Others'), c('2','Neuronal'),
                    c('1','Neuronal'), c('2','Others'), c('1','Others'))
-increase = 0.1
-base = 1.05
+increase = 0.08
+base = 0.65
 pos_y_comparisons = c(rep(base, 4), rep(base + increase, 2), base + 2:5*increase)
 
 p1 = plot_data %>% ggplot(aes(gene.score, abs(GS), fill=gene.score)) + 
@@ -518,7 +518,7 @@ p1 = plot_data %>% ggplot(aes(gene.score, abs(GS), fill=gene.score)) +
 
 
 increase = 0.08
-base = 1
+base = 0.8
 pos_y_comparisons = c(rep(base, 4), rep(base + increase, 2), base + 2:5*increase)
 
 p2 = plot_data %>% ggplot(aes(gene.score, abs(MTcor), fill=gene.score)) + 

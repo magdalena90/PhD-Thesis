@@ -144,8 +144,8 @@ plot_EGs = function(module){
 
   p = plot_data %>% ggplot(aes(Diagnosis, MEs, fill=Diagnosis)) + 
       geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3) +
-      ggtitle(paste0('Cluster ', genes_info$module_number[genes_info$Module==module][1], 
-                     '  (MTcor=',round(genes_info$MTcor[genes_info$Module == module][1],2),')')) + 
+      #ggtitle(paste0('Cluster ', genes_info$module_number[genes_info$Module==module][1], 
+      #               '  (MTcor=',round(genes_info$MTcor[genes_info$Module == module][1],2),')')) + 
       stat_compare_means(method = 't.test', method.args = list(var.equal = FALSE), label = 'p.signif',
                         ref.group = 'ASD') +
       ylab('Cluster Eigengenes') + theme_minimal() + theme(legend.position='none')#, plot.margin = margin(0,0,0,2,'cm'))
@@ -194,15 +194,15 @@ create_plot = function(module){
                scale_color_manual(values=SFARI_colour_hue(r=c(SFARI_colors,7))) + theme_minimal())
   
   # For thesis
-  # p = plot_data %>% mutate(gene.score = ifelse(gene.score =='Others', 'Not in SFARI', 
-  #                                              ifelse(gene.score=='Neuronal', as.character(gene.score), 
-  #                                                     paste('Score',as.character(gene.score))))) %>% 
-  #     mutate(gene.score = factor(gene.score, levels = c('Score 1', 'Score 2', 'Score 3', 'Neuronal', 
+  # p = plot_data %>% mutate(gene.score = ifelse(gene.score =='Others', 'Not in SFARI',
+  #                                              ifelse(gene.score=='Neuronal', as.character(gene.score),
+  #                                                     paste('Score',as.character(gene.score))))) %>%
+  #     mutate(gene.score = factor(gene.score, levels = c('Score 1', 'Score 2', 'Score 3', 'Neuronal',
   #                                                       'Not in SFARI')),
   #            alpha = ifelse(grepl('Score', gene.score), 1, 0)) %>%
-  #     ggplot(aes(MM, GS, color=gene.score, shape = gene.score)) + geom_point(aes(alpha = alpha)) +  
+  #     ggplot(aes(MM, GS, color=gene.score, shape = gene.score)) + geom_point(aes(alpha = alpha)) +
   #     xlab('Cluster Membership') + ylab('Gene Significance') + scale_alpha_binned(range = c(0.5, 0.9)) +
-  #     scale_color_manual(values=SFARI_colour_hue(r=c(SFARI_colors,7))) + theme_minimal() + 
+  #     scale_color_manual(values=SFARI_colour_hue(r=c(SFARI_colors,7))) + theme_minimal() +
   #     labs(color = 'SFARI Score', shape = 'SFARI Score') + guides(alpha = FALSE)
   # if(module != top_modules[length(top_modules)]) {p = p + theme(legend.position = 'none')}
   
@@ -309,12 +309,12 @@ create_plot = function(i){
                       theme(axis.text.x = element_text(angle = 90, hjust = 1)))
   
   # For thesis
-  # p = plot_data %>% mutate(external_gene_id=factor(`Gene Symbol`, 
-  #                                   levels=rev(unique(plot_data$`Gene Symbol`)), ordered=T)) %>%
-  #     ggplot(aes(external_gene_id, value, fill=Diagnosis)) + 
-  #     geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) +
-  #     xlab('') + ylab('Level of expression') + theme_minimal() + coord_flip()
-  # if(i < length(top_modules)) {p = p + theme(legend.position = 'none')}
+  p = plot_data %>% mutate(external_gene_id=factor(`Gene Symbol`,
+                                    levels=rev(unique(plot_data$`Gene Symbol`)), ordered=T)) %>%
+      ggplot(aes(external_gene_id, value, fill=Diagnosis)) +
+      geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) +
+      xlab('') + ylab('Level of expression') + theme_minimal() + coord_flip() + theme(legend.position = 'none')
+  #if(i < length(top_modules)) {p = p + theme(legend.position = 'none')}
   
   return(p)
   
@@ -495,17 +495,17 @@ create_plot = function(module){
                scale_color_manual(values=SFARI_colour_hue(r=c(SFARI_colors,7))) + theme_minimal())
   
   # For thesis
-  # p = plot_data %>% mutate(gene.score = ifelse(gene.score =='Others', 'Not in SFARI',
-  #                                              ifelse(gene.score=='Neuronal', as.character(gene.score),
-  #                                                     paste('Score',as.character(gene.score))))) %>%
-  #     mutate(gene.score = factor(gene.score, levels = c('Score 1', 'Score 2', 'Score 3', 'Neuronal',
-  #                                                       'Not in SFARI')),
-  #            alpha = ifelse(grepl('Score', gene.score), 1, 0)) %>%
-  #     ggplot(aes(MM, GS, color=gene.score, shape = gene.score)) + geom_point(aes(alpha = alpha)) +
-  #     xlab('Cluster Membership') + ylab('Gene Significance') + scale_alpha_binned(range = c(0.5, 0.9)) +
-  #     scale_color_manual(values=SFARI_colour_hue(r=c(SFARI_colors,7))) + theme_minimal() +
-  #     labs(color = 'SFARI Score', shape = 'SFARI Score') + guides(alpha = FALSE)
-  # if(module != top_modules[length(top_modules)]) {p = p + theme(legend.position = 'none')}
+  p = plot_data %>% mutate(gene.score = ifelse(gene.score =='Others', 'Not in SFARI',
+                                               ifelse(gene.score=='Neuronal', as.character(gene.score),
+                                                      paste('Score',as.character(gene.score))))) %>%
+      mutate(gene.score = factor(gene.score, levels = c('Score 1', 'Score 2', 'Score 3', 'Neuronal',
+                                                        'Not in SFARI')),
+             alpha = ifelse(grepl('Score', gene.score), 1, 0)) %>%
+      ggplot(aes(MM, GS, color=gene.score, shape = gene.score)) + geom_point(aes(alpha = alpha)) +
+      xlab('Cluster Membership') + ylab('Gene Significance') + scale_alpha_binned(range = c(0.5, 0.9)) +
+      scale_color_manual(values=SFARI_colour_hue(r=c(SFARI_colors,7))) + theme_minimal() +
+      labs(color = 'SFARI Score', shape = 'SFARI Score') + guides(alpha = FALSE) + theme(legend.position = 'none')
+  #if(module != top_modules[length(top_modules)]) {p = p + theme(legend.position = 'none')}
   
   return(p)
 }
@@ -610,11 +610,11 @@ create_plot = function(i){
                       theme(axis.text.x = element_text(angle = 90, hjust = 1)))
   
   # # For the thesis
-  # p = plot_data %>% mutate(external_gene_id=factor(`Gene Symbol`,
-  #                                   levels=rev(unique(plot_data$`Gene Symbol`)), ordered=T)) %>%
-  #     ggplot(aes(external_gene_id, value, fill=Diagnosis)) +
-  #     geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) +
-  #     xlab('') + ylab('Level of expression') + theme_minimal() + coord_flip()
+  p = plot_data %>% mutate(external_gene_id=factor(`Gene Symbol`,
+                                    levels=rev(unique(plot_data$`Gene Symbol`)), ordered=T)) %>%
+      ggplot(aes(external_gene_id, value, fill=Diagnosis)) +
+      geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) +
+      xlab('') + ylab('Level of expression') + theme_minimal() + coord_flip() + theme(legend.position = 'none')
   # if(i < length(top_modules)) {p = p + theme(legend.position = 'none')}
   
   return(p)
