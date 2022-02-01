@@ -555,7 +555,7 @@ To better understand the model, the coefficients of the features that represent 
 
 Together, these two plots show that the model is identifying the SFARI Genes using their similarity to clusters with a high enrichment with SFARI Genes as well as to clusters with a moderate cluster-diagnosis correlation.
 
-```{r warning=FALSE, message=FALSE, fig.height56, fig.width=10}
+```{r warning=FALSE, message=FALSE, fig.height=5, fig.width=10}
 
 plot_data = coefs_info %>% inner_join(genes_info %>% dplyr::select(Module, MTcor, pval_ORA) %>% unique, 
                                       by='Module') %>%
