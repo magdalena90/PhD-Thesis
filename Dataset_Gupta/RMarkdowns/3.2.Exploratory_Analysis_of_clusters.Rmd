@@ -378,6 +378,8 @@ for(i in 1:length(modules)){
 enrichment_data = enrichment_data %>% 
                   left_join(genes_info %>% dplyr::select(Module, MTcor) %>% unique, by = 'Module')
 
+write.csv(enrichment_data, file = './../Data/preprocessedData/SFARI_enrichment_by_cluster.csv')
+
 
 rm(i, module, genes_in_module, ORA_module, ORA_pval, ORA_padj, getinfo, mart, term2gene)
 ```

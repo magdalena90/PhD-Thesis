@@ -1,0 +1,670 @@
+---
+title: '4.1 Classification methods'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+<br>
+
+#### Load R packages and define colour functions
+```{r load_packages, warning=FALSE, message=FALSE}
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(colorspace)
+library(GGally) ; library(ggpubr) ; library(ggExtra)
+library(expss)
+library(rstatix)
+library(caret) ; library(DMwR) ; library(MLmetrics) ; library(ROCR)
+library(knitr) ; library(kableExtra)
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+
+```
+<br>
+
+---
+
+<br>
+
+# 4.1.1. Feature engineering
+<br>
+
+The features that will be considered for the classification model will be the ones WGCNA uses to identify significant modules and genes:
+
+- **Correlation of a gene's expression pattern to diagnosis**: Using Gene Significance
+
+- **Correlation of a gene's module to Diagnosis**: Using Module-Diagnosis correlation
+
+- **Module assignment**: Here, instead of just indicating the cluster the gene belongs to in a binary way, we decided to use the Module Membership, which measures the similarity of each gene to the module they belong, and we decided to also add the Module Membership to all of the other modules as well, since this could give us much more information than the original binary assignment (using eigengenes)
+
+```{r}
+
+# Create dataset for classification methods
+WGCNA_metrics =  read.csv('./../Data/preprocessedData/WGCNA_metrics.csv')
+dataset = WGCNA_metrics %>% dplyr::select(-c(matches(paste('pval|odule')), MMgray)) %>% mutate('absGS' = abs(GS))
+
+# Enrichment in SFARI Genes by cluster
+SFARI_enrichment_by_cluster = read.csv('../Data/preprocessedData/SFARI_enrichment_by_cluster.csv', row.names=1)
+
+# Add gene info
+load('./../Data/preprocessedData/preprocessed_data.RData')
+genes_info = WGCNA_metrics %>% dplyr::select(ID, gene.score, Module, module_number, MTcor, gene.score) %>% 
+             left_join(datGenes %>% mutate('ID' = rownames(.)) %>% dplyr::select(ID, hgnc_symbol), by = 'ID') %>%
+             left_join(data.frame('ID' = rownames(datExpr), 'meanExpr' = rowMeans(datExpr)), by = 'ID') %>%
+             left_join(SFARI_enrichment_by_cluster %>% dplyr::select(Module, pval_ORA, padj_ORA), by = 'Module')
+
+rm(datGenes, datMeta, WGCNA_metrics, SFARI_enrichment_by_cluster)
+```
+<br><br>
+
+Filtering the `r sum(genes_info$Module=='gray')` genes that were not assigned to any cluster (represented as the gray cluster) and samples without a cluster-diagnosis correlation (`r sum(apply(dataset, 1, function(x) sum(is.na(x)))>0)`)
+
+```{r}
+
+# Remove unassigned genes
+dataset = dataset[genes_info$Module != 'gray',]
+genes_info = genes_info %>% filter(Module != 'gray')
+
+# Remove genes with NAs
+dataset = dataset %>% drop_na()
+genes_info = genes_info %>% filter(ID %in% dataset$ID)
+```
+<br><br>
+
+Adding labels to the genes indicating if they are part of the SFARI Genes list or not
+
+```{r}
+
+dataset = dataset %>% mutate('SFARI' = genes_info$gene.score %in% c('1','2','3')) %>% dplyr::select(-gene.score)
+
+# name rows with gene IDs
+IDs = dataset %>% pull(ID)
+dataset = dataset %>% dplyr::select(-ID)
+rownames(dataset) = IDs
+
+save(dataset, genes_info, file = '../Data/preprocessedData/classification_dataset.RData')
+
+rm(IDs)
+```
+
+<br>
+
+#### Summary of the changes made to the original WGCNA variables:
+
+<br>
+
+- Using Module Membership variables instead of binary module membership
+
+- Including a new variable with the absolute value of GS
+
+- Removing genes assigned to the gray module (unclassified genes)
+
+- Adding the Objective variable: Binary label indicating if it's in the SFARI dataset or not
+
+<br>
+
+The final dataset contains `r nrow(dataset)` observations (genes) and `r ncol(dataset)` variables
+
+<br><br>
+
+## Exploratory analysis
+<br>
+
+### PCA of variables
+<br>
+
+The Module Membership variables are grouped by Module-Trait correlation, with positive correlations on one side, negative on the other, and both SFARI and absGS are in the middle of both groups.
+
+```{r tsne_mtcor_variables, warning=FALSE, fig.width=12}
+
+pca = dataset %>% mutate(SFARI = as.numeric(SFARI)) %>% t %>% prcomp
+
+plot_data = data.frame('ID'=colnames(dataset), 'PC1' = pca$x[,1], 'PC2' = pca$x[,2],
+                       type=ifelse(grepl('MM', colnames(dataset)),'ClusterMembership',
+                            ifelse(grepl('SFARI', colnames(dataset)), 'SFARI',
+                            ifelse(grepl('absGS', colnames(dataset)), 'absGS',
+                            ifelse(grepl('GS', colnames(dataset)), 'GS', 'CDcor')))))
+
+
+mtcor_by_module = genes_info %>% dplyr::select(Module, MTcor) %>% unique
+colnames(mtcor_by_module) = c('ID','MTcor')
+
+plot_data = mtcor_by_module %>% mutate(ID = gsub('#','MM.',ID)) %>% right_join(plot_data, by='ID') %>% 
+            mutate
+
+ggplotly(plot_data %>% ggplot(aes(PC1, PC2, color=MTcor)) + geom_point(aes(id=ID)) + 
+         geom_text(data = subset(plot_data, type !='ClusterMembership'), 
+                   aes(PC1, PC2, label=type), nudge_y = c(3,3,-3,3)) +
+         xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1],1),'%)')) +
+         ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2],1),'%)')) + coord_fixed() +
+         theme_minimal() + theme(legend.position = 'bottom', legend.key.width=unit(1, 'cm')) + 
+         labs(color = 'Cluster-diagnosis correlation ') + scale_colour_continuous_diverging(palette='Tropic') +
+         ggtitle('PCA of variables coloured by cluster-diagnosis correlation'))
+
+
+rm(mtcor_by_module, pca)
+```
+
+### PCA of samples
+
+<br>
+
+- The two main patterns that seem to characterise the genes are their Gene Significance and the Module-Diagnosis correlation of their corresponding module
+
+- Mean Expression doesn't seem to play an important role
+
+- SFARI Genes seem to be evenly distributed everywhere
+
+- It's not clear what the 2nd principal component is capturing
+
+```{r pca_obs, fig.width=12, fig.height=10, fig.align='center', warning=FALSE, message=FALSE}
+
+# PCA
+pca = dataset %>% t %>% prcomp
+
+plot_data = data.frame('ID'=rownames(dataset), 'PC1'=pca$rotation[,1], 'PC2'=pca$rotation[,2], 
+                       'SFARI'=dataset$SFARI, 'MTcor'=dataset$MTcor, 'GS'=dataset$GS) %>%
+            mutate(alpha=ifelse(SFARI, 0.7, 0.2)) %>% left_join(genes_info %>% dplyr::select(-MTcor), by='ID')
+
+p1 = plot_data %>% ggplot(aes(PC1, PC2, color=MTcor)) + geom_point(alpha=0.4) + scale_color_viridis() + 
+     xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1]),'%)')) +
+     ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2]),'%)')) + coord_fixed() +
+     theme_minimal() + theme(legend.position='bottom') + labs(color = 'Cluster-diagnosis\ncorrelation') +
+     ggtitle('Genes coloured by Module-Diagnosis correlation')
+
+p2 = plot_data %>% ggplot(aes(PC1, PC2, color=GS)) + geom_point(alpha=0.4) + scale_color_viridis() + 
+     xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1]),'%)')) +
+     ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2]),'%)')) + coord_fixed() +
+     theme_minimal() + theme(legend.position='bottom') + labs(color = 'Gene\nSignificance') + 
+     ggtitle('Genes coloured by Gene Significance')
+
+p3 = plot_data %>% mutate(color = ifelse(SFARI==TRUE, '', NA)) %>% 
+     ggplot(aes(PC1, PC2)) + geom_point(aes(color = color), alpha = plot_data$alpha) +
+     scale_color_manual(values = c('#00BFC4','gray'), limits = c('',''), na.value = 'gray',
+                        guide = guide_legend(title.position = 'right')) + 
+     xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1]),'%)')) +
+     ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2]),'%)')) + 
+     labs(color = 'SFARI Genes') + coord_fixed() + theme_minimal() + theme(legend.position='bottom') +
+     ggtitle('Genes coloured by SFARI label')
+p3 = ggExtra::ggMarginal(p3, type='density', groupColour=TRUE, size=10)
+
+p4 = plot_data %>% ggplot(aes(PC1, PC2, color=meanExpr)) + geom_point(alpha=0.4) + scale_color_viridis() + 
+     xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1]),'%)')) +
+     ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2]),'%)')) + coord_fixed() +
+     theme_minimal() + theme(legend.position='bottom') + labs(color = 'Mean expression') +
+     ggtitle('Genes coloured by mean level of expression')
+
+grid.arrange(p1, p2, p3, p4, nrow=2)
+
+
+rm(pca, plot_data, p1, p2, p3, p4)
+```
+<br>
+
+---
+
+<br>
+
+# 4.1.2 Training, validation and testing sets
+<br>
+
+`r round(mean(dataset$SFARI)*100,2)`% of the observations are positive. This can be a problem when training the classification model, so the samples in the training set should be balanced between classes before the model is trained.
+
+```{r}
+table_info = dataset %>% apply_labels(SFARI = 'SFARI')
+
+cro(table_info$SFARI)
+
+rm(table_info)
+```
+
+
+To divide our samples into training and test sets:
+
+- Use 70% of the samples in the training set, 15% in the validation set, and 15% in the test set
+
+- Even though our model's label is binary, we are using the original SFARI Scores to do the partition in training, validation and test sets to maintain the original score proportions in each set
+
+- **SMOTE** is usde to fix the class imbalance in the training set. An over-sampling technique that over-samples the minority class (SFARI Genes) by creating synthetic examples
+
+```{r}
+
+create_train_val_test_sets = function(dataset, genes_info, p_train, p_val, seed){
+  
+  # Get SFARI Score of all the samples so our train and test sets are balanced for each score
+  sample_scores = data.frame('ID' = rownames(dataset)) %>% 
+                  left_join(genes_info %>% dplyr::select(ID, gene.score), by = 'ID') %>% 
+                  mutate(gene.score = ifelse(!(gene.score %in% c('1','2','3')), 'None', gene.score))
+  
+  set.seed(seed)
+  train_idx = createDataPartition(sample_scores$gene.score, p = p_train, list = FALSE)
+  train_set = dataset[train_idx,]
+  
+  val_idx = createDataPartition(sample_scores$gene.score[-train_idx], p = p_val/(1-p_train), list = FALSE)
+  val_set = dataset[-train_idx,][val_idx,]
+  test_set = dataset[!rownames(dataset) %in% c(rownames(train_set), rownames(val_set)),]
+  
+  # Modify SFARI label in train set, save gene IDs (bc we lose them with SMOTE) and perform oversampling using SMOTE
+  # Note: we can't return the IDs to the training set because of the oversampling, which created repeated IDs
+  set.seed(seed)
+  train_set = train_set %>% mutate(SFARI = ifelse(SFARI == TRUE, 'SFARI', 'not_SFARI') %>% as.factor,
+                                   ID = rownames(.) %>% as.factor) %>% SMOTE(form = SFARI ~ . - ID)
+  train_set_IDs = train_set %>% pull(ID)
+  
+  return(list('train_set' = train_set %>% dplyr::select(-ID), 'val_set' = val_set, 'test_set' = test_set, 
+              'train_set_IDs' = train_set_IDs))
+}
+
+p_train = 0.7
+p_val = 0.15
+seed = 123 
+
+train_val_test_sets = create_train_val_test_sets(dataset, genes_info, p_train, p_val, seed)
+train_set = train_val_test_sets[['train_set']]
+val_set = train_val_test_sets[['val_set']]
+test_set = train_val_test_sets[['test_set']]
+train_set_IDs = train_val_test_sets[['train_set_IDs']]
+
+rm(p_train, p_val, seed)
+```
+
+The training set consists of `r nrow(train_set)` genes, the validation set of `r nrow(val_set)`, and the test set of `r nrow(test_set)` genes.
+<br>
+
+#### Label distribution in training set
+<br>
+
+The classes are much more balanced now
+
+* The division between labels is not exactly 50-50, but instead `r round(100*mean(train_set$SFARI == 'SFARI'))` - `r 100-round(100*mean(train_set$SFARI == 'SFARI'))` because SMOTE allows there to be a small difference between classes so the over-sampling is not overused. This could be corrected but then the training set would be smaller
+
+```{r}
+cro(train_set$SFARI)
+```
+<br>
+
+#### Labels distribution in validation and test sets
+<br>
+
+These sets are just used to evaluate how well the model performs, so the class imbalance is not a problem here
+```{r}
+cro(val_set$SFARI)
+cro(test_set$SFARI)
+```
+<br>
+
+---
+
+<br>
+
+# 4.1.4 Logistic Regression
+<br>
+
+Training the model with the training set and using it to infer the labels in the validation and test sets
+```{r warning=FALSE, message=FALSE}
+
+calc_performance_metrics = function(model, selected_set){
+  
+  predictions = model %>% predict(selected_set, type = 'prob') %>% mutate(prob = SFARI, pred = prob>0.5, 
+                SFARI = selected_set$SFARI) %>% dplyr::select(-c(not_SFARI))
+  
+  if(all(predictions$pred == 0)){
+    prec = NA
+    F1 = NA
+  } else {
+    prec = Precision(predictions$SFARI %>% as.numeric, predictions$pred %>% as.numeric, positive = '1')
+    F1 = F1_Score(predictions$SFARI %>% as.numeric, predictions$pred %>% as.numeric, positive = '1')
+  }
+  
+  acc = mean(predictions$SFARI == predictions$pred)
+  rec = Recall(predictions$SFARI %>% as.numeric, predictions$pred %>% as.numeric, positive = '1')
+  pred_ROCR = prediction(predictions$prob, predictions$SFARI)
+  AUC = performance(pred_ROCR, measure='auc')@y.values[[1]]
+  MLP = performance(pred_ROCR, measure='lift', x.measure='rpp')@y.values[[1]] %>% max(na.rm = TRUE)
+  b_acc = mean(c(mean(predictions$SFARI[predictions$SFARI] == predictions$pred[predictions$SFARI]),
+                 mean(predictions$SFARI[!predictions$SFARI] == predictions$pred[!predictions$SFARI])))
+  
+  return(c('acc' = acc, 'prec' = prec, 'rec' = rec, 'F1' = F1, 'AUC' = AUC, 'MLP'=MLP, 'b_acc' = b_acc))  
+}
+
+train_model = function(dataset, genes_info, p_train, p_val, seed){
+
+  # Create training, validation and test sets
+  train_val_test_sets = create_train_val_test_sets(dataset, genes_info, p_train, p_val, seed)
+  train_set = train_val_test_sets[['train_set']]
+  val_set = train_val_test_sets[['val_set']]
+  test_set = train_val_test_sets[['test_set']]
+  train_set_IDs = train_val_test_sets[['train_set_IDs']]
+  
+  # Train Logistic regression
+  model = caret::train(SFARI ~ ., data = train_set, method = 'glm', family = 'binomial',
+                     trControl = trainControl(classProbs = TRUE, method = 'none'))
+  
+  # Calculate performance metrics
+  pred_train = calc_performance_metrics(model, train_set %>% mutate(SFARI = SFARI=='SFARI'))
+  pred_val = calc_performance_metrics(model, val_set)
+  pred_test = calc_performance_metrics(model, test_set)
+  
+  return(list('coefs'=model$finalModel, 'pm_train'=pred_train, 'pm_val'=pred_val, 
+              'pm_test'=pred_test))
+  
+}
+
+seeds = 123:(123+99)
+
+for(seed in seeds){
+  
+  # Run model
+  model_output = train_model(dataset, genes_info, 0.7, 0.15, seed)
+  
+  # Update outputs
+  if(seed == seeds[1]){
+    
+    # There are perfect correlations in the dataset, we need to remove them:
+    ok_vars = !is.na(model_output$coefs$coefficients)
+    dataset = dataset[,c(ok_vars[-1], TRUE)]
+    model_output = train_model(dataset, genes_info, 0.7, 0.15, seed)
+    save(dataset, genes_info, file = '../Data/preprocessedData/classification_dataset.RData')
+    
+    pm_train = model_output$pm_train %>% data.frame
+    pm_val = model_output$pm_val %>% data.frame
+    pm_test = model_output$pm_test %>% data.frame
+    coefs = model_output$coefs$coefficients %>% data.frame
+  } else{
+    pm_train = cbind(pm_train, model_output$pm_train)
+    pm_val = cbind(pm_val, model_output$pm_val)
+    pm_test = cbind(pm_test, model_output$pm_test)
+    coefs = cbind(coefs, model_output$coefs$coefficients)
+  }
+}
+
+rm(seed, seeds, calc_performance_metrics, train_model)
+```
+<br>
+
+## Analysis of Results
+
+<br>
+
+#### Performance metrics
+<br>
+
+The model performs well
+```{r}
+pm = data.frame('mean_train' = rowMeans(pm_train), 'sd_train' = apply(pm_train, 1, sd),
+                'mean_val' = rowMeans(pm_val), 'sd_val' = apply(pm_val, 1, sd),
+                'mean_test' = rowMeans(pm_test), 'sd_test' = apply(pm_test, 1, sd))
+
+rownames(pm) = c('Accuracy','Precision','Recall','F1','AUC','MLP','Balanced Accuracy')
+kable(pm %>% round(2), col.names = c('Train (mean)','Train (SD)','Validation (mean)', 'Validation (SD)',
+                                     'Test (mean)','Test (SD)'))
+
+rm(pm)
+```
+
+#### Coefficients
+<br>
+
+The coefficients are very high for some variables, which may mean that these features play a very important role in the characterisation of SFARI Genes, but it can also mean that there is some multicollinearity in the dataset. 
+
+The high variance between runs also points to an unstable model.
+```{r, fig.align='center', fig.width=12}
+
+cluster_table = genes_info %>% dplyr::select(Module, module_number) %>% unique()
+
+coefs_info = data.frame('coef' = rownames(coefs), 'mean' = coefs %>% rowMeans, 'sd' = coefs %>% apply(1, sd)) %>%
+             mutate('Module' = ifelse(grepl('MM.', coef), 
+                                    paste0('#',gsub('MM.','',coef)), 
+                                    coef %>% as.character)) %>%
+             left_join(cluster_table, by = 'Module') %>%
+             mutate('features' = ifelse(is.na(module_number), Module, paste0('CM Cl ', module_number)))
+
+coefs_info %>% ggplot(aes(reorder(features, mean), y = mean)) + geom_bar(stat = 'identity', fill = '#009999') + 
+               geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.3, position=position_dodge(.9)) + 
+               xlab('Feature') + ylab('Coefficient') + 
+               theme_minimal() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+                                       legend.position = 'none')
+
+```
+<br>
+
+Using the Variance Inflation Number to calculate the multicollinearity affecting each feature we can see the dataset has very high multicollinearity
+
+```{r, fig.width=10, fig.height=3, fig.align='center', warning=FALSE, message=FALSE}
+# VIF
+plot_data = data.frame('Module' = car::vif(model_output$coefs) %>% sort %>% names,
+                       'VIF' = car::vif(model_output$coefs) %>% sort %>% unname) %>%
+             mutate('Module' = ifelse(grepl('MM.', Module), 
+                                    paste0('#',gsub('MM.','',Module)), 
+                                    Module %>% as.character)) %>%
+             left_join(cluster_table, by = 'Module') %>%
+             mutate('Feature' = ifelse(is.na(module_number), Module, paste0('CM Cl ', module_number))) %>%
+            mutate(outlier = VIF>10)
+
+plot_data %>% ggplot(aes(reorder(Feature, -VIF), VIF, fill = !outlier)) + geom_bar(stat='identity') + 
+              scale_y_log10() + geom_hline(yintercept = 10, color = 'gray', linetype = 'dashed') + 
+              xlab('Feature') +  theme_minimal() +
+              ggtitle('Variance Inflation Number for each Feature') +
+              theme(legend.position = 'none', axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+rm(plot_data)
+```
+
+<br>
+
+### Possible solutions to Multicollinearity:
+<br>
+
+1. Remove all variables with a VIF>10: We would lose all but two of our variables, not ideal
+
+2. Do Principal Component Regression: We would lose the relation between the prediction and the original features, which could be interesting to study
+
+3. Don't do anything: Multicollinearity affects the coefficients and p-values of the regression, but it doesn't affect the predictions, precision of the predictions or the goodness-of-fit statistics [ref](https://statisticsbyjim.com/regression/multicollinearity-in-regression-analysis/), but as with the previous option, we cannot study the coefficients of the regression
+
+4. **Use Ridge Regression**: The penalty it gives to high coefficients reduces the variance introduced by the correlation, making the coefficients interpretable again
+
+<br>
+
+The best option of the four is to use a Ridge regression because logistic regression was selected because of its interpretability, so losing it would defeat the purpose of this analysis, and removing all the features with high multicollinearity would damage the model's predictive power given their high numbers.
+
+<br><br>
+
+---
+
+<br>
+
+# 4.1.5 Ridge Regression
+<br>
+
+**NOTE:** Since this model has parameters to tune (lambda), cross-validation is needed, which increases the running time of the model. Because of this, this model is not run here in the notebook, but instead in the script `train_ridge_regression.R` in the `supportingScripts`
+
+```{r}
+
+load('../Data/Results/Ridge_regression.RData')
+
+```
+
+<br>
+
+## Analysis of Results
+<br>
+
+#### Performance metrics
+<br>
+
+The performance of the Ridge model is very similar to the logistic model, which is expected, since the multicollinearity of the model doesn't affect the predictive power of the logistic model.
+
+```{r}
+pm = data.frame('mean_train' = ridge_pm_train$mean, 'sd_train' = ridge_pm_train$sd,
+                'mean_val' = ridge_pm_val$mean, 'sd_val' = ridge_pm_val$sd,
+                'mean_test' = ridge_pm_test$mean, 'sd_test' = ridge_pm_test$sd)
+rownames(pm) = c('Accuracy','Precision','Recall','F1','AUC','MLP','Balanced Accuracy')
+kable(pm %>% round(2), col.names = c('Train (mean)','Train (SD)','Validation (mean)', 'Validation (SD)',
+                                     'Test (mean)','Test (SD)'))
+
+rm(pm)
+```
+<br>
+
+```{r ROC_curve, fig.align='center'}
+
+pred_ROCR = prediction(ridge_predictions$prob, ridge_predictions$SFARI)
+
+roc_ROCR = performance(pred_ROCR, measure='tpr', x.measure='fpr')
+auc = performance(pred_ROCR, measure='auc')@y.values[[1]]
+
+plot(roc_ROCR, main=paste0('ROC curve (AUC=',round(auc,2),')'), col='#009999')
+abline(a=0, b=1, col='#666666')
+
+```
+
+```{r lift_plot, fig.align='center'}
+lift_ROCR = performance(pred_ROCR, measure='lift', x.measure='rpp')
+plot(lift_ROCR, main='Lift curve', col='#86b300')
+
+rm(pred_ROCR, roc_ROCR, auc, lift_ROCR)
+```
+<br>
+
+#### Coefficients
+<br>
+
+The coefficients are very high for some variables, which may mean that these features play a very important role in the characterisation of SFARI Genes, but it can also mean that there is some multicollinearity in the dataset. 
+
+The high variance between runs also points to an unstable model.
+```{r, fig.align='center', fig.width=12}
+
+cluster_table = genes_info %>% dplyr::select(Module, module_number) %>% unique()
+
+coefs_info = ridge_coefs %>% mutate('Module' = ifelse(grepl('MM.', coef), paste0('#',gsub('MM.','',coef)), 
+                                    coef %>% as.character)) %>%
+             left_join(cluster_table, by = 'Module') %>%
+             mutate('features' = ifelse(is.na(module_number), Module, paste0('CM Cl ', module_number)),
+                     'color' = ifelse(grepl('#', Module), Module, 'gray')) %>% arrange(mean) %>%
+             mutate(features = ifelse(features == 'MTcor', 'CDcor', features))
+
+coefs_info %>% ggplot(aes(reorder(features, mean), y = mean)) + geom_bar(stat = 'identity', fill = coefs_info$color) + 
+               geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.3, position=position_dodge(.9)) + 
+               xlab('Feature') + ylab('Coefficient') + 
+               theme_minimal() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+                                       legend.position = 'none')
+
+```
+<br>
+To better understand the model, the coefficients of the features that represent the cluster-membership of each cluster can be contrasted to the characteristics of its corresponding cluster:
+
+- Negative coefficients correspond mainly to clusters with no enrichment in SFARI Genes and the positive coefficients to clusters with a high enrichment.
+
+- Clusters with the highest cluster-diagnosis correlations tend to have coefficients close to zero, while clusters with a more moderate cluster-diagnosis correlations have the coefficients with the highest magnitudes.
+
+Together, these two plots show that the model is identifying the SFARI Genes using their similarity to clusters with a high enrichment with SFARI Genes as well as to clusters with a moderate cluster-diagnosis correlation.
+
+```{r warning=FALSE, message=FALSE, fig.height=5, fig.width=10}
+
+plot_data = coefs_info %>% inner_join(genes_info %>% dplyr::select(Module, MTcor, pval_ORA) %>% unique, 
+                                      by='Module') %>%
+            left_join(data.frame(table(genes_info$Module)) %>% dplyr::rename('Module' = Var1))
+
+p1 = ggplotly(plot_data %>% ggplot(aes(x=mean, y=MTcor)) + 
+              geom_point(aes(size=Freq, ID = coef), color=plot_data$Module, alpha = 0.5) + 
+              geom_smooth(alpha = 0.1, color = 'gray', size = 0.5) + coord_cartesian(ylim=c(-1,1)) + 
+              xlab('Coefficient') + ylab('Cluster-diagnosis correlation') +
+              theme_minimal() + theme(legend.position='none')) %>% 
+     layout(xaxis = list(title='Coefficient'), yaxis = list(title='Cluster-diagnosis correlation'))
+    
+
+p2 = ggplotly(plot_data %>% ggplot(aes(x=mean, y=1-pval_ORA)) + 
+              geom_point(aes(size=Freq, ID = coef), color=plot_data$Module, alpha = 0.5) + 
+              geom_smooth(alpha = 0.1, color = 'gray', size = 0.5) +  coord_cartesian(ylim=c(0,1)) + 
+              xlab('Coefficient') + ylab('Enrichment in SFARI Genes') +
+              theme_minimal() + theme(legend.position='none')) %>%
+     layout(xaxis = list(title='Coefficient'), yaxis = list(title='Enrichment in SFARI Genes'))
+
+subplot(p1,p2, titleX = TRUE, titleY = TRUE)
+
+rm(p1, p2)
+```
+
+#### Distribution of probabilities
+<br>
+
+The model assigns higher probabilities to SFARI Genes than to Neuronal genes, which in turn is assigned higher probabilities than the rest of the genes which are neither SFARI nor Neuronal with a p-value lower than $10^{-4}$ in all cases. This would be expected, since the performance metrics show the model preforms well and SFARI Genes are more similar to Neuronal genes than to the rest of the genes. What is not expected is the pattern observed when comparing the SFARI Scores, where it can be seen that the model assigns statistically significantly higher probabilities to genes in SFARI Score 1 than to SFARI Score 2, which in turn is assigned statistically significantly higher probabilities than SFARI Score 3, since this information was not included in the model. 
+
+```{r fig.width=8, fig.height = 6, fig.align='center', warning=FALSE, message=FALSE}
+
+plot_data = ridge_predictions %>% left_join(genes_info %>% dplyr::select(ID, gene.score), by = 'ID') %>%
+            mutate(SFARI_genes = ifelse(gene.score %in% c('Neuronal','Others'), as.character(gene.score), 'SFARI')) %>%
+            mutate(SFARI_genes = factor(SFARI_genes, levels = c('SFARI','Neuronal','Others'))) %>%
+            apply_labels(gene.score='SFARI Gene score')
+
+wt = plot_data %>% wilcox_test(prob~SFARI_genes, p.adjust.method = 'BH') %>% add_x_position(x = 'group')
+increase = 0.06
+base = 0.9
+pos_y_comparisons = c(base, base+increase, base)
+
+p1 = plot_data %>% ggplot(aes(SFARI_genes, prob)) + 
+              geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=SFARI_genes)) +
+              stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) +
+              scale_fill_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + 
+              xlab('') + ylab('Probability') + #ggtitle('Distribution of probabilities by category') + 
+              scale_x_discrete(labels=c('SFARI' = 'SFARI\nGenes', 'Others' = 'Other\ngenes',
+                                        'Neuronal' = 'Neuronal\ngenes')) +
+              theme_minimal() + theme(legend.position = 'none')
+
+
+wt = plot_data %>% wilcox_test(prob~gene.score, p.adjust.method = 'BH') %>% add_x_position(x = 'group')
+increase = 0.05
+base = 0.9
+pos_y_comparisons = c(base + c(0,1,3,5)*increase, base+c(0,2,4)*increase, base+0:1*increase, base)
+
+p2 = plot_data %>% ggplot(aes(gene.score, prob)) + 
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=gene.score)) +
+     stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) +
+     scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + xlab('') + ylab('Probability') + 
+    # ggtitle('Distribution of probabilities by SFARI score') +
+     scale_x_discrete(labels=c('1' = 'SFARI\nScore 1', '2' = 'SFARI\nScore 2', '3' = 'SFARI\nScore 3', 
+                               'Others' = 'Other\ngenes', 'Neuronal' = 'Neuronal\ngenes')) +
+     theme_minimal() + theme(legend.position = 'none')
+
+grid.arrange(p1, p2, nrow = 1)
+
+rm(mean_vals, increase, base, pos_y_comparisons, wt)
+```
+<br>
+
+#### Bias related to mean level of expression
+<br>
+
+ A possible explanation for this statistically significant difference in probabilities between SFARI Scores could be that the model is biased towards genes with higher levels of expression, since SFARI Scores have been found to be strongly related to it and the relation between the mean level of expression of genes and SFARI Genes was found to be present both at gene- and at cluster-level analyses.
+
+There is a weak positive relation for all genes except for the ones with the lowest levels of expression. This suggests that the classifier is using the level of expression of a gene, or some confounder of it, as a factor when calculating its similarity to the SFARI genes.
+
+```{r warning=FALSE, message=FALSE, fig.align='center'}
+
+plot_data = ridge_predictions %>% left_join(genes_info %>% dplyr::select(ID, meanExpr), by='ID')
+
+plot_data %>% ggplot(aes(meanExpr, prob)) + geom_point(alpha=0.2, color='#0099cc') + 
+              geom_smooth(method='loess', color='gray', alpha=0.2, size = 0.5) + xlab('Mean Expression') + 
+              ylab('Probability') + ggtitle('Mean expression vs model probability by gene') +
+              theme_minimal()
+
+```
+<br>
+
+Since there is no biological evidence supporting the relation found between a gene’s level of expression and its role in ASD, and instead it could be an inherited bias or a technical effect, it is better to remove it from the model to be certain that the patterns it is detecting are genuinely biological.
+
+<br><br>
+
+---
+
+<br>
+
+#### Session info
+
+```{r print_session_info}
+sessionInfo()
+```
+<br><br>

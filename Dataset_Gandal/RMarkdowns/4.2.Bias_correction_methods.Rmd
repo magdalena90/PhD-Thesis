@@ -452,6 +452,7 @@ rm(p1, p2)
 <br>
 
 As the previous models, the Weighting technique assigns statistically higher probabilities to SFARI Genes than to the rest of the genes, independently of having neuronal annotations or not, but this time, the probabilities assigned to each of the SFARI Scores are not visibly nor statistically different between Scores, which suggests the level of expression may no longer be playing an important role in the model's characterisation of the SFARI Genes.
+
 ```{r fig.width = 10, fig.height = 6, fig.align='center', warning=FALSE, message=FALSE}
 
 plot_data = weights_predictions %>% left_join(genes_info %>% dplyr::select(ID, gene.score), by = 'ID') %>%
@@ -498,7 +499,7 @@ rm(mean_vals, increase, base, pos_y_comparisons, wt)
 ### Bias related to mean level of expression
 <br>
 
-Tthe Weighting technique successfully removes the positive relation between the mean level of expression of the genes and their probability assigned by the model, although this relation appears to have been replaced by a small negative linear trend.
+The Weighting technique successfully removes the positive relation between the mean level of expression of the genes and their probability assigned by the model, although this relation appears to have been replaced by a small negative linear trend.
 
 ```{r warning=FALSE, message=FALSE, fig.align='center'}
 
@@ -539,6 +540,9 @@ kable(top_genes)
 ```
 <br>
 
+The GS percentiles of the top 10 genes have a mean of `r mean(top_genes$perc_GS[1:10])`, and a standard deviation of `r sd(top_genes$perc_GS[1:10])`. The Cluster-diagnosis correlation has a mean of `r mean(top_genes$perc_MTcor[1:10])` and a standard deviation of `r sd(top_genes$perc_MTcor[1:10])`
+
+<br>
 
 These results show that it is possible to use gene expression dysregulation information to characterise SFARI Genes in an unbiased way, discovering that SFARI Genes have low dysregulation themselves but are associated to groups of genes with high dysregulation, and also proving that this information is useful to find new genes that have a high probability of being associated to ASD.
 

@@ -1,0 +1,556 @@
+---
+title: '4.2 Bias correction methods'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+<br>
+
+#### Load R packages and define colour functions
+```{r load_packages, warning=FALSE, message=FALSE}
+library(tidyverse) ; library(reshape2) ; library(glue) ; library(plotly)
+library(RColorBrewer) ; library(viridis) ; require(gridExtra) ; library(colorspace)
+library(GGally) ; library(ggpubr) ; library(ggExtra)
+library(expss)
+library(mgcv)
+library(rstatix)
+library(ROCR)
+library(knitr) ; library(kableExtra)
+
+SFARI_colour_hue = function(r) {
+  pal = c('#FF7631','#FFB100','#E8E328','#8CC83F','#62CCA6','#59B9C9','#b3b3b3','#808080','gray','#d9d9d9')[r]
+}
+
+```
+
+```{r}
+load('../Data/preprocessedData/classification_dataset.RData')
+load('../Data/Results/Ridge_regression.RData')
+```
+
+<br>
+
+---
+
+<br>
+
+Work in fair classification can be categorised into three approaches:
+
+<br><br>
+
+#### 1. Post-processing Approach
+
+<br>
+
+After the model has been trained with the bias, perform a post-processing of the classifier outputs. This approach is quite simple to implement but has some downsides:
+
+- It has limited flexibility
+
+- Decoupling the training and calibration can lead to models with poor accuracy tradeoff (when training your model it may be focusing on the bias, in our case mean expression, and overlooking more important aspects of your data, such as biological significance)
+
+<br><br>
+
+#### 2. Lagrangian Approach
+
+<br>
+
+Transforming the problem into a constrained optimisation problem (fairness as the constraint) using Lagrange multipliers.
+
+Some of the downsides of this approach are:
+
+- The fairness constraints are often irregular and have to be relaxed in order to optimise
+
+- Training can be difficult, the Lagrangian may not even have a solution to converge to
+
+- Constrained optimisation can be inherently unstable
+
+- It can overfit and have poor fairness generalisation 
+
+- It often yields poor trade-offs in fairness and accuracy
+
+
+<br><br>
+
+#### 3. Pre-processing Approach
+
+<br>
+
+These approaches primarily involve "massaging" the data to remove bias.
+
+Some downsides are:
+
+- These approaches typically do not perform as well as the state-of-art and come with few theoretical guarantees
+
+**Note:** In earlier versions of this code, I implemented this approach by trying to remove the level of expression signal from each feature of the dataset (since the Module Membership features capture the bias in an indirect way), but removing the mean expression signal modified the module membership of the genes in big ways sometimes and it didn't seem to solve the problem in the end, so this proved not to be very useful and wasn't implemented in this final version
+
+<br>
+
+----
+
+<br>
+
+# 4.2.3. Post-processing approach
+<br>
+
+Since the effect of the bias is proportional to the mean level of expression of a gene, it can be corrected by fitting a curve to the relation between probability and mean expression of the genes in the dataset, and using the residuals of the fit to represent the unbiased output of the classifier.
+
+## Linear fit
+
+```{r linear_fit, warning=FALSE, message=FALSE, fig.width=12, fig.height=5}
+
+plot_data = ridge_predictions %>% dplyr::select(ID, prob) %>% 
+            left_join(genes_info %>% dplyr::select(ID, meanExpr), by = 'ID')
+
+lm_fit = lm(prob ~ meanExpr, data = plot_data)
+
+plot_data = plot_data %>% mutate(lm_res = lm_fit$residuals)
+
+p1 = plot_data %>% ggplot(aes(meanExpr, prob)) + geom_point(alpha=0.1, color='#0099cc') + 
+     geom_smooth(method='lm', color='gray', alpha=0.1) + xlab('Mean Expression') + ylab('Probability') + 
+     theme_minimal() + ggtitle('Linear Fit')
+
+p2 = plot_data %>% ggplot(aes(meanExpr, lm_res)) + geom_point(alpha=0.1, color='#0099cc') + 
+     geom_smooth(method='gam', color='gray', alpha=0.1, linetype = 'dashed') + 
+     geom_smooth(method='lm', color='gray', alpha=0.1) + 
+     xlab('Mean Expression') + ylab('Residuals') + theme_minimal()
+
+grid.arrange(p1, p2, nrow=1)
+
+rm(p1, p2)
+```
+
+The linear fit was an $R^2$ of `r round(summary(lm_fit)$r.squared, 4)`
+<br>
+
+## GAM fit
+<br>
+
+A more flexible way of modelling the bias in the predictions is using Generalised Additive Models (GAMs), which use linear regression at its core, but incorporate smooth functions that allow it to model nonlinear relationships between the variables.
+
+```{r GAM_fit, warning=FALSE, message=FALSE, fig.width=12, fig.height=5}
+
+gam_fit = gam(prob ~ s(meanExpr), method = 'REML', data = plot_data)
+
+plot_data = plot_data %>% mutate(gam_res = gam_fit$residuals)
+
+p1 = plot_data %>% ggplot(aes(meanExpr, prob)) + geom_point(alpha=0.1, color='#0099cc') + 
+     geom_smooth(method='gam', color='gray', alpha=0.1) + xlab('Mean Expression') + ylab('Probability') + 
+     theme_minimal()
+
+p2 = plot_data %>% ggplot(aes(meanExpr, gam_res)) + geom_point(alpha=0.1, color='#0099cc') + 
+     geom_smooth(method='gam', color='gray', alpha=0.1, linetype = 'dashed') + 
+     xlab('Mean Expression') + ylab('Residuals') + theme_minimal()
+
+grid.arrange(p1, p2, nrow=1)
+
+rm(lm_fit, p1, p2)
+```
+
+The GAM fit was an $R^2$ of `r round(summary(gam_fit)$r.sq,4)`
+<br>
+
+GAMs are selected over a linear model because of their ability to accurately model and remove the bias in the dataset. The final step to use the residuals as unbiased probabilities is to re-scale them so all the genes have values between 0 and 1. Since the average value of the residuals is zero, this is accomplished by adding to each residual the average value of the probabilities of the Ridge regression model. This way, not only can the new scores be interpreted as probabilities, but the new unbiased model will have the same mean probability as the original one.
+
+```{r, warning=FALSE, message=FALSE, fig.align='center'}
+
+GAM_predictions = plot_data %>% mutate(prob = gam_res + mean(plot_data$prob)) %>% dplyr::select(ID, prob, meanExpr) %>%
+                  mutate(prob = ifelse(prob<0, 0, prob), pred = prob > 0.5) %>% 
+                  left_join(ridge_predictions %>% dplyr::select(ID, hgnc_symbol, SFARI), by = 'ID')
+
+# Plot results
+GAM_predictions %>% ggplot(aes(meanExpr, prob)) + geom_point(alpha=0.2, color='#0099cc') + 
+              geom_smooth(method='loess', color='gray', alpha=0.2, size = 0.5) + xlab('Mean Expression') + 
+              ylab('GAM corrected probability') + #ggtitle('Mean expression vs model probability by gene') +
+              theme_minimal()
+
+rm(gam_fit)
+```
+<br>
+
+## Analysis of results
+<br>
+
+### Performance metrics
+<br>
+
+**NOTE:** The Ridge regression needs to be run 100 times again, which takes a long time. Because of this, this model is not run here in the notebook, but instead in the script `train_ridge_regression_w_GAM_correction.R` in the `supportingScripts` folder.
+
+```{r}
+
+load('../Data/Results/Ridge_regression_w_GAM_correction.RData')
+
+pm = data.frame('mean_train' = GAM_pm_train$mean, 'sd_train' = GAM_pm_train$sd,
+                'mean_val' = GAM_pm_val$mean, 'sd_val' = GAM_pm_val$sd,
+                'mean_test' = GAM_pm_test$mean, 'sd_test' = GAM_pm_test$sd)
+rownames(pm) = c('Accuracy','Precision','Recall','F1','AUC','MLP','Balanced Accuracy')
+kable(pm %>% round(2), col.names = c('Train (mean)','Train (SD)','Validation (mean)', 'Validation (SD)',
+                                     'Test (mean)','Test (SD)'))
+
+rm(pm)
+```
+
+
+## Distribution of probabilities
+<br>
+
+```{r fig.width=8, fig.height = 6, fig.align='center', warning=FALSE, message=FALSE}
+
+plot_data = GAM_predictions %>% left_join(genes_info %>% dplyr::select(ID, gene.score), by = 'ID') %>%
+            mutate(SFARI_genes = ifelse(gene.score %in% c('Neuronal','Others'), as.character(gene.score), 'SFARI')) %>%
+            mutate(SFARI_genes = factor(SFARI_genes, levels = c('SFARI','Neuronal','Others'))) %>%
+            apply_labels(gene.score='SFARI Gene score')
+
+wt = plot_data %>% wilcox_test(prob~SFARI_genes, p.adjust.method = 'BH') %>% add_x_position(x = 'group')
+increase = 0.06
+base = 0.85
+pos_y_comparisons = c(base, base+increase, base)
+
+p1 = plot_data %>% ggplot(aes(SFARI_genes, prob)) + 
+              geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=SFARI_genes)) +
+              stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) +
+              scale_fill_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + 
+              xlab('') + ylab('Probability') + #ggtitle('Distribution of probabilities by category') + 
+              scale_x_discrete(labels=c('SFARI' = 'SFARI\nGenes', 'Others' = 'Other\ngenes',
+                                        'Neuronal' = 'Neuronal\ngenes')) +
+              theme_minimal() + theme(legend.position = 'none')
+
+
+wt = plot_data %>% wilcox_test(prob~gene.score, p.adjust.method = 'BH') %>% add_x_position(x = 'group')
+increase = 0.05
+base = 0.85
+pos_y_comparisons = c(base + c(0,1,3,5)*increase, base+c(0,2,4)*increase, base+0:1*increase, base)
+
+p2 = plot_data %>% ggplot(aes(gene.score, prob)) + 
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=gene.score)) +
+     stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) +
+     scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + xlab('') + ylab('Probability') + 
+     #ggtitle('Distribution of probabilities by SFARI score') +
+     scale_x_discrete(labels=c('1' = 'SFARI\nScore 1', '2' = 'SFARI\nScore 2', '3' = 'SFARI\nScore 3', 
+                               'Others' = 'Other\ngenes', 'Neuronal' = 'Neuronal\ngenes')) +
+     theme_minimal() + theme(legend.position = 'none')
+
+grid.arrange(p1, p2, nrow = 1)
+
+rm(mean_vals, increase, base, pos_y_comparisons, wt, p1, p2)
+```
+<br>
+
+The fact that the model continues to assign significantly different probabilities to the SFARI Scores even after removing the bias related to mean level of expression using the post-processing approach could mean that there is some other aspect characterising the genes with high Scores as SFARI Genes unrelated to their higher level of expression, but it could also mean that this bias correction method is only removing the bias superficially and that it still plays an indirect role in the characterisation of the genes.
+
+To examine which of these two options is more likely, a second bias correction technique is implemented.
+
+<br><br>
+
+-----
+
+<br>
+
+# 4.2.4. Weighting technique
+<br>
+
+## Original algorithm
+<br>
+
+The original formula for the Demographic Parity bias is
+
+- $c(x,0) = 0 $ when the prediction is negative
+
+- $c(x,1) = \frac{g(x)}{Z_G}-1$ when the prediction is positive. Where $g(x)$ is the Kronecker delta to indicate if the sample belongs to the protected group and $Z_G$ is the proportion of the population that belongs to the group we want to protect against bias
+
+<br>
+
+Using this definitions in our problem:
+
+$g(x):$ Since all our samples belong to the protected group, this would always be 1
+
+$Z_G:$ Since all of our samples belong to the protected group, this would also always be 1
+
+So our measure of bias $c(x,1) = \frac{1}{1}-1 = 0$ for all samples. This doesn't work, so we need to adapt it to our continous case
+
+<br>
+
+## Modification for treating continuous bias
+<br>
+
+We can use $c(x,1) = (x-mean(meanExpr(D)))/sd(meanExpr(D))$ as the constraint function, this way, when we calculate the bias of the dataset:
+
+$h(x)\cdot c(x)$ will only be zero if the positive samples are balanced around the mean expression, and the sign of the bias will indicate the direction of the bias
+
+**Pseudocode:**
+
+```
+lambda = 0
+w = [1, ..., 1]
+c = (x-mean(meanExpr(D)))/sd(meanExpr(D))
+
+h  = train classifier H with lambda and w
+
+for t in 1,,,T do
+  bias = <h(x), c(x)>
+  update lambda to lambda - eta*bias
+  update weights_hat to exp(lambda*mean(c))
+  update weights to w_hat/(1+w_hat) if y_i=1, 1/(1+w_hat) if y_i=0
+  update h with new weights
+  
+Return h
+```
+
+<br>
+
+## Implementation
+<br>
+
+**NOTE:** This algorithm is even heavier than the Ridge regression, since it needs to run $T$ iterations within each of the 100 iterations, which takes a long time. Because of this, this model is not run here in the notebook, but instead in the script `train_ridge_regression_w_weights_correction.R` in the `supportingScripts` folder.
+
+### Progress of the model's bias and performance through each iteration of the bias correction algorithm
+
+```{r fig.align='center'}
+
+load('../Data/Results/Ridge_regression_w_weights_correction_.RData')
+
+plot_data = data.frame('iter' = 1:length(weights_model_output$bias_vec), 
+                       'Bias' = weights_model_output$bias_vec,
+                       'BalancedAccuracy' = weights_model_output$b_acc_vec) %>%
+            reshape2::melt(id.vars = 'iter') %>% 
+            mutate(variable = ifelse(variable == 'BalancedAccuracy','Balanced accuracy', 'Bias'))
+
+plot_data %>% ggplot(aes(x=iter, y=value, color = variable)) + geom_line() + 
+              xlab('Iteration') + ylab('Value') + theme_minimal() + labs(color = 'Metric ') +
+              theme(legend.position = 'bottom')
+```
+
+### Weights of the final model
+
+<br>
+Optimimum lambda value: `r  weights_model_output$lambda`
+
+The weighting technique assigns weights to the samples that counteract the bias related to mean level of expression
+
+```{r fig.align='center'}
+
+lambda = weights_model_output$lambda
+
+mean_expr = genes_info %>% dplyr::select(ID, meanExpr) %>% left_join(weights_predictions, by = 'ID') %>% 
+            filter(n>0) %>% mutate('meanExpr_std' = (meanExpr-mean(meanExpr))/sd(meanExpr))
+
+w_hat = exp(lambda*mean_expr$meanExpr_std) # inverse to mean expr
+w = 1/(1+w_hat) # prop to mean expr
+
+# update w: inv mean expr Positives, prop Negatives:
+w[mean_expr$SFARI %>% as.logical] = w[mean_expr$SFARI %>% as.logical]*w_hat[mean_expr$SFARI %>% as.logical]
+
+plot_data = data.frame('meanExpr' = mean_expr$meanExpr, 'w_hat' = w_hat, 'w' = w, 'SFARI' = mean_expr$SFARI, 
+                       'pred' = mean_expr$pred)
+
+plot_data %>% ggplot(aes(meanExpr, w, color = SFARI)) + geom_point(alpha = 0.2) + 
+  xlab('Mean expression') + ylab('Weight') + theme_minimal() + theme(legend.position='bottom')
+
+rm(lambda, mean_expr, w_hat, w, plot_data)
+```
+<br>
+
+## Analysis of results
+<br>
+
+### Performance metrics
+
+```{r}
+pm = data.frame('mean_train' = weights_pm_train$mean, 'sd_train' = weights_pm_train$sd,
+                'mean_val' = weights_pm_val$mean, 'sd_val' = weights_pm_val$sd,
+                'mean_test' = weights_pm_test$mean, 'sd_test' = weights_pm_test$sd)
+rownames(pm) = c('Accuracy','Precision','Recall','F1','AUC','MLP','Balanced Accuracy')
+kable(pm %>% round(2), col.names = c('Train (mean)','Train (SD)','Validation (mean)', 'Validation (SD)',
+                                     'Test (mean)','Test (SD)'))
+
+rm(pm)
+```
+
+<br>
+
+```{r ROC_curve, fig.align='center'}
+
+pred_ROCR = prediction(weights_predictions$prob, weights_predictions$SFARI)
+
+roc_ROCR = performance(pred_ROCR, measure='tpr', x.measure='fpr')
+auc = performance(pred_ROCR, measure='auc')@y.values[[1]]
+
+plot(roc_ROCR, main=paste0('ROC curve (AUC=',round(auc,2),')'), col='#009999')
+abline(a=0, b=1, col='#666666')
+
+```
+
+```{r lift_plot, fig.align='center'}
+lift_ROCR = performance(pred_ROCR, measure='lift', x.measure='rpp')
+plot(lift_ROCR, main='Lift curve', col='#86b300')
+
+rm(pred_ROCR, roc_ROCR, auc, lift_ROCR)
+```
+<br>
+
+### Coefficients
+<br>
+
+The magnitude of the GS has a positive coefficient, unlike in Gandal's dataset
+
+```{r, fig.align='center', fig.width=12}
+
+cluster_table = genes_info %>% dplyr::select(Module, module_number) %>% unique()
+
+coefs_info = weights_coefs %>% mutate('Module' = ifelse(grepl('MM.', coef), paste0('#',gsub('MM.','',coef)), 
+                                    coef %>% as.character)) %>%
+             left_join(cluster_table, by = 'Module') %>%
+             mutate('features' = ifelse(is.na(module_number), Module, paste0('CM Cl ', module_number)),
+                     'color' = ifelse(grepl('#', Module), Module, 'gray')) %>% arrange(mean) %>%
+             mutate(features = ifelse(features == 'MTcor', 'CDcor', features))
+
+coefs_info %>% ggplot(aes(reorder(features, mean), y = mean)) + geom_bar(stat = 'identity', fill = coefs_info$color) + 
+               geom_errorbar(aes(ymin=mean-sd, ymax=mean+sd), width=.3, position=position_dodge(.9)) + 
+               xlab('Feature') + ylab('Coefficient') + 
+               theme_minimal() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+                                       legend.position = 'none')
+
+```
+<br>
+To better understand the model, the coefficients of the features that represent the cluster-membership of each cluster can be contrasted to the characteristics of its corresponding cluster:
+
+- Negative coefficients correspond mainly to clusters with no enrichment in SFARI Genes and the positive coefficients to clusters with a high enrichment.
+
+- There is no visible relation between the cluster-diagnosis correlation and the magnitude of the features
+
+```{r warning=FALSE, message=FALSE, fig.height=5, fig.width=10}
+
+plot_data = coefs_info %>% inner_join(genes_info %>% dplyr::select(Module, MTcor, pval_ORA) %>% unique, 
+                                      by='Module') %>%
+            left_join(data.frame(table(genes_info$Module)) %>% dplyr::rename('Module' = Var1))
+
+p1 = ggplotly(plot_data %>% ggplot(aes(x=mean, y=MTcor)) + 
+              geom_point(aes(size=Freq, ID = coef), color=plot_data$Module, alpha = 0.5) + 
+              geom_smooth(alpha = 0.1, color = 'gray', size = 0.5) + coord_cartesian(ylim=c(-1,1)) + 
+              #xlab('Coefficient') + ylab('Cluster-diagnosis correlation') +
+              theme_minimal() + theme(legend.position='none')) %>% 
+     layout(xaxis = list(title='Coefficient'), yaxis = list(title='Cluster-diagnosis correlation'))
+    
+
+p2 = ggplotly(plot_data %>% ggplot(aes(x=mean, y=1-pval_ORA)) + 
+              geom_point(aes(size=Freq, ID = coef), color=plot_data$Module, alpha = 0.5) + 
+              geom_smooth(alpha = 0.1, color = 'gray', size = 0.5) +  coord_cartesian(ylim=c(0,1)) + 
+              xlab('Coefficient') + ylab('Enrichment in SFARI Genes') +
+              theme_minimal() + theme(legend.position='none')) %>%
+     layout(xaxis = list(title='Coefficient'), yaxis = list(title='Enrichment in SFARI Genes'))
+
+subplot(p1,p2, titleX = TRUE, titleY = TRUE)
+
+rm(p1, p2)
+```
+
+
+#### Distribution of probabilities
+<br>
+
+As the previous models, the Weighting technique assigns statistically higher probabilities to SFARI Genes than to the rest of the genes, independently of having neuronal annotations or not, and unlike in Gandal's dataset, it continues to discriminate between SFARI Scores, assigning SFARI Score 1 higher probabilities than scores 2 and 3.
+
+```{r fig.width = 10, fig.height = 6, fig.align='center', warning=FALSE, message=FALSE}
+
+plot_data = weights_predictions %>% left_join(genes_info %>% dplyr::select(ID, gene.score), by = 'ID') %>%
+            mutate(SFARI_genes = ifelse(gene.score %in% c('Neuronal','Others'),as.character(gene.score),'SFARI')) %>%
+            mutate(SFARI_genes = factor(SFARI_genes, levels = c('SFARI','Neuronal','Others'))) %>%
+            apply_labels(gene.score='SFARI Gene score')
+
+wt = plot_data %>% wilcox_test(prob~SFARI_genes, p.adjust.method = 'BH') %>% add_x_position(x = 'group')
+increase = 0.05
+base = 0.75
+pos_y_comparisons = c(base, base+increase, base)
+
+p1 = plot_data %>% ggplot(aes(SFARI_genes, prob)) + 
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=SFARI_genes)) +
+     stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) +
+     scale_fill_manual(values=c('#00A4F7', SFARI_colour_hue(r=c(8,7)))) + 
+     xlab('') + ylab('Probability') + #ggtitle('Distribution of probabilities by category') + 
+     scale_x_discrete(labels=c('SFARI' = 'SFARI\nGenes', 'Others' = 'Other\ngenes',
+                               'Neuronal' = 'Neuronal\ngenes')) +
+     theme_minimal() + theme(legend.position = 'none')
+
+
+wt = plot_data %>% wilcox_test(prob~gene.score, p.adjust.method = 'BH') %>% add_x_position(x = 'group')
+increase = 0.05
+base = 0.75
+pos_y_comparisons = c(base + c(0,1,3,5)*increase, base+c(0,2,4)*increase, base+0:1*increase, base)
+
+p2 = plot_data %>% ggplot(aes(gene.score, prob)) + 
+     geom_boxplot(outlier.colour='#cccccc', outlier.shape='o', outlier.size=3, aes(fill=gene.score)) +
+     stat_pvalue_manual(wt, y.position = pos_y_comparisons, tip.length = .01) +
+     scale_fill_manual(values=SFARI_colour_hue(r=c(1:3,8,7))) + xlab('') + ylab('Probability') + 
+     #ggtitle('Distribution of probabilities by SFARI score') +
+     scale_x_discrete(labels=c('1' = 'SFARI\nScore 1', '2' = 'SFARI\nScore 2', '3' = 'SFARI\nScore 3', 
+                               'Others' = 'Other\ngenes', 'Neuronal' = 'Neuronal\ngenes')) +
+     theme_minimal() + theme(legend.position = 'none')
+
+grid.arrange(p1, p2, nrow = 1)
+
+rm(mean_vals, increase, base, pos_y_comparisons, wt)
+```
+
+<br>
+
+#### Bias related to mean level of expression
+<br>
+
+The Weighting technique successfully removes the positive relation between the mean level of expression of the genes and their probability assigned by the model
+
+```{r warning=FALSE, message=FALSE, fig.align='center'}
+
+load('../Data/Results/Ridge_regression.RData')
+
+plot_data = weights_predictions %>% left_join(genes_info %>% dplyr::select(ID, meanExpr), by='ID')
+
+plot_data %>% ggplot(aes(meanExpr, prob)) + geom_point(alpha=0.2, color='#0099cc') + 
+              geom_smooth(method='loess', color='gray', alpha=0.2, size = 0.5) + xlab('Mean Expression') + 
+              ylab('Probability') + ggtitle('Mean expression vs model probability by gene') +
+              coord_cartesian(ylim=c(min(ridge_predictions$prob),max(ridge_predictions$prob))) + theme_minimal()
+
+rm(list = ls(pattern = 'ridge_'))
+```
+<br>
+
+## Top genes
+<br>
+
+To identify new genes that could play a role in ASD, the 10 non-SFARI genes that were assigned the highest probabilities by the Weighting technique are presented. 
+
+```{r}
+
+perc_GS = ecdf(dataset$GS)
+perc_MTcor = ecdf(unique(dataset$MTcor))
+
+top_genes = weights_predictions %>% arrange(desc(prob)) %>% filter(!SFARI) %>% top_n(n=25, wt=prob) %>% 
+            dplyr::select(ID, hgnc_symbol, prob) %>% 
+            left_join(dataset %>% mutate(ID=rownames(.)) %>% dplyr::select(ID, GS, MTcor), by = 'ID') %>%
+            mutate(perc_GS = round(100*perc_GS(GS)), perc_MTcor = round(100*perc_MTcor(MTcor))) %>%
+            dplyr::select(hgnc_symbol, GS, perc_GS, MTcor, perc_MTcor, prob) %>% 
+            mutate(prob = round(prob,3), GS = round(GS,2), MTcor = round(MTcor,2))
+
+kable(top_genes)
+
+```
+<br>
+
+
+The GS percentiles of the top 10 genes have a mean of `r mean(top_genes$perc_GS[1:10])`, and a standard deviation of `r sd(top_genes$perc_GS[1:10])`. The Cluster-diagnosis correlation has a mean of `r mean(top_genes$perc_MTcor[1:10])` and a standard deviation of `r sd(top_genes$perc_MTcor[1:10])`
+
+<br>
+
+These results show that it is possible to use gene expression dysregulation information to characterise SFARI Genes in an unbiased way, discovering that SFARI Genes have low dysregulation themselves but are associated to groups of genes with high dysregulation, and also proving that this information is useful to find new genes that have a high probability of being associated to ASD.
+
+<br><br>
+
+---
+
+<br>
+
+#### Session info
+
+```{r print_session_info}
+sessionInfo()
+```
+<br><br>
