@@ -202,6 +202,8 @@ plot_data %>% ggplot(aes(PC1, PC2, color=MeanExpr)) + geom_point(alpha=0.3) + th
               theme(legend.position = 'bottom', legend.key.width=unit(3, 'cm')) + labs(color='Mean Expression ')
 
 ```
+The correlation between the mean expression of the genes and the 1st principal component is `r cor(plot_data$PC1, plot_data$MeanExpr)`
+
 <br>
 
 #### t-SNE
