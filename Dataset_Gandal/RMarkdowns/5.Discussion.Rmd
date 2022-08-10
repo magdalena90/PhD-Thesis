@@ -1,0 +1,310 @@
+---
+title: '5. Discussion'
+output:
+  html_document:
+    code_folding: 'hide'
+---
+
+<br>
+
+#### Load R packages and define colour functions
+```{r load_packages, warning=FALSE, message=FALSE}
+
+library(tidyverse)
+library(viridis)
+library(ggpubr)
+library(knitr)
+
+# Classification model
+library(caret)
+library(expss)
+library(MLmetrics)
+
+# Other scoring systems
+library(disgenet2r)
+library(readxl)
+library(polycor)
+library(corrplot)
+library(kableExtra)
+
+```
+
+#### BrainSpan dataset
+
+Downloaded from [www.brainspan.org/static/download.html](http://www.brainspan.org/static/download.html)
+
+File name: RNA-Seq Gencode v10 summarized to genes
+
+```{r load_datasets, echo=TRUE, message=FALSE, warning=FALSE}
+# BrainSpan data expression matrix
+datExpr = read.csv('./../../BrainSpan/Data/expression_matrix.csv', header = FALSE)
+genes_info = read.csv('./../../BrainSpan/Data/rows_metadata.csv')
+
+# Remove index column in datExpr
+datExpr = datExpr[,-1]
+
+# SFARI Genes
+SFARI_genes = read_csv('./../../SFARI/Data/SFARI_genes_01-03-2020_w_ensembl_IDs.csv')
+
+```
+
+The dataset contains `r nrow(datExpr)` genes from `r ncol(datExpr)` samples.
+
+Log transforming the data to help visualisations
+```{r}
+datExpr = log2(datExpr+1)
+```
+
+```{r pca_genes, fig.width=10, warning=FALSE, message=FALSE}
+
+datExpr_sample = datExpr %>% slice_sample(prop=0.2)
+
+pca = datExpr_sample  %>% prcomp
+
+plot_data = data.frame('PC1' = pca$x[,1], 'PC2' = pca$x[,2], 'MeanExpr'=rowMeans(datExpr_sample))
+
+plot_data %>% ggplot(aes(PC1, PC2, color=sqrt(MeanExpr))) + geom_point(alpha=0.3) + theme_minimal() + 
+              scale_color_viridis() + coord_fixed() + #ggtitle('PCA') +
+              xlab(paste0('PC1 (',round(100*summary(pca)$importance[2,1],1),'%)')) +
+              ylab(paste0('PC2 (',round(100*summary(pca)$importance[2,2],1),'%)')) +
+              theme(legend.position = 'bottom', legend.key.width=unit(2, 'cm')) + 
+              labs(color='sqrt(Mean Expression) ')
+
+rm(pca)
+```
+
+The correlation between the mean expression of the genes and the 1st principal component is `r cor(plot_data$PC1, plot_data$MeanExpr)`
+
+If genes with SFARI Score 1 are considered as positive and the rest of the genes in the dataset are the pool from which the negative genes are selected, there is a very different distribution of mean level of expression between these two classes:
+
+```{r}
+
+plot_data = data.frame(ID = genes_info$ensembl_gene_id, meanExpr = rowMeans(datExpr)) %>% 
+            left_join(SFARI_genes %>% dplyr::select(`ensembl-id`, `gene-score`), by = c('ID' = 'ensembl-id')) %>%
+            mutate(label = ifelse(`gene-score`!='1' | is.na(`gene-score`), 'Negative','Positive'))
+
+plot_data %>% ggplot(aes(x = label, y=meanExpr, fill = label)) +
+              geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) + 
+              stat_compare_means(label = 'p.signif', method = 't.test', method.args = list(var.equal=F)) + 
+              ylab('Mean Expression') + theme_minimal() + theme(legend.position = 'none')
+
+```
+
+Training a classifier using only the mean level of expression as feature and sampling from the negative set to get an equal number of positive and negative samples
+
+```{r}
+set.seed(123)
+
+dataset = plot_data %>% dplyr::select(meanExpr, label)
+dataset = rbind(dataset %>% filter(label == 'Positive'), 
+                dataset %>% filter(label == 'Negative') %>% slice_sample(n = sum(dataset$label == 'Positive')))
+
+train_idx = createDataPartition(dataset$label, p = 0.8, list = FALSE)
+train_set = dataset[train_idx,]
+test_set = dataset[-train_idx,]
+
+cro(train_set$label)
+cro(test_set$label)
+```
+
+```{r}
+
+model = caret::train(label ~ ., data = train_set, method = 'glm', family = 'binomial',
+                     trControl = trainControl(classProbs = TRUE, method = 'none'))
+
+test_set = test_set %>% mutate(pred_label = model %>% predict(test_set))
+
+```
+
+Accuracy of the model: `r mean(test_set$label == test_set$pred_label)`
+
+F1 score of the modek: `r F1_Score(test_set$label, test_set$pred_label) `
+
+
+Model details:
+
+```{r}
+model$finalModel
+```
+
+<br>
+
+## 5.1 Comparison with other scoring systems and disorders
+
+**NOTE:** To use disgenet2r you now have to register for a free account [here](https://www.disgenet.org/signup/), get an API key using the function `get_disgenet_api_key` and save it in the system environment. The instructions of how to do it are [here](https://www.disgenet.org/static/disgenet2r/disgenet2r.html#installation-and-first-run). It seems you need to do this every time you start a new R session.
+
+```{r warning=FALSE, message=FALSE}
+
+# Load Gandal dataset
+load('./../Data/preprocessedData/preprocessed_data.RData')
+datExpr = datExpr %>% data.frame
+
+# Load SFARI Genes
+SFARI_genes = read_csv('./../../SFARI/Data/SFARI_genes_01-03-2020_w_ensembl_IDs.csv')
+
+# DisGeNET
+DisGeNET = list()
+DisGeNET[['asd']] = disease2gene(disease = 'C0004352')@qresult   # Autism Spectrum Disorder
+DisGeNET[['scz']] = disease2gene(disease = 'C0036341')@qresult   # Schizophrenia
+DisGeNET[['bd']]  = disease2gene(disease = 'C0005586')@qresult   # Bipolar Disorder
+DisGeNET[['id']]  = disease2gene(disease = 'C3714756')@qresult   # Intellectual Disability
+DisGeNET[['dd']]  = disease2gene(disease = 'C0011581')@qresult   # Depressive Disorder
+DisGeNET[['ai']]  = disease2gene(disease = 'C0001973')@qresult   # Alcoholic Intoxication, Chronic
+
+# Krishnan
+krishnan = read_excel('./../../Other_scoring_systems/krishnan_probability_score.xlsx', 
+                      sheet = 'Genome-wide_prediction') %>%
+           dplyr::select(symbol, score, `p-value`) %>% 
+           dplyr::rename('gene' = symbol, 'Krishnan' = score, 'Krishnan_p_value' = `p-value`)
+
+# TADA
+TADA = read_excel('./../../Other_scoring_systems/sanders_TADA_score.xlsx') %>% 
+       dplyr::select(Gene, p.TADA, q.TADA) %>%
+       dplyr::rename('gene' = Gene, 'TADA' = q.TADA, 'TADA_p_value' = p.TADA)
+
+
+all_scores = SFARI_genes %>% dplyr::select(`gene-symbol`, `gene-score`) %>% dplyr::rename('gene'=`gene-symbol`) %>%
+             mutate(SFARI = factor(ifelse(`gene-score` == 'Others', NA, `gene-score`), levels = c('3','2','1'))) %>%
+             full_join(DisGeNET[['asd']] %>% dplyr::rename('gene' = gene_symbol, 'DisGeNET' = score), by = 'gene') %>% 
+             full_join(krishnan, by = 'gene') %>% 
+             full_join(TADA, by = 'gene') %>% 
+             right_join(data.frame('gene' = datGenes$hgnc_symbol, 'meanExpr' = rowMeans(datExpr)), by = 'gene') %>%
+             dplyr::select(gene, DisGeNET, SFARI, Krishnan, TADA, meanExpr) %>% distinct()
+
+rm(datMeta, dds, krishnan, TADA)
+```
+<br>
+
+### Other ASD scoring systems
+
+#### Correlations between scoring systems
+
+The SFARI, DisGeNET and Krishnan scores have a strong correlation, while Sanders TADA score has either a neutral or a negative correlation with all the others. All of the correlations have a corrected p-value lower than 0.05, the highest being Krishnan vs. TADA with 0.04.
+
+```{r}
+
+scoring_systems = c('DisGeNET','SFARI','Krishnan','TADA')
+
+corrplot.mixed(hetcor(all_scores[,scoring_systems], use = 'pairwise.complete.obs')$correlations,
+               p.mat = cor.mtest(all_scores[,scoring_systems] %>% 
+                                 mutate(SFARI = SFARI %>% as.numeric))$p, sig.level = 0.05,
+               lower = 'number', lower.col = '#666666', number.cex = 1, tl.col = '#666666')
+```
+
+
+#### Correlation between scoring systems and mean expression of the genes
+
+Parallel to the results found above, The SFARI, Krishnan and DisGeNET scores have positive correlations, while Sanders TADA score appears to be independent.
+
+```{r}
+cor_score_mean_expr = data.frame('SFARI' = c(hetcor(all_scores$SFARI, all_scores$meanExpr)$correlations[1,-1],
+                                             cor.test(all_scores$SFARI %>% as.numeric, all_scores$meanExpr)$p.value),
+                                 'Krishnan' = c(hetcor(all_scores$Krishnan, all_scores$meanExpr)$correlations[1,-1],
+                                                cor.test(all_scores$Krishnan, all_scores$meanExpr)$p.value),
+                                 'TADA' = c(hetcor(all_scores$TADA, all_scores$meanExpr)$correlations[1,-1],
+                                            cor.test(all_scores$TADA, all_scores$meanExpr)$p.value),
+                                 'DisGeNET' = c(hetcor(all_scores$DisGeNET, all_scores$meanExpr)$correlations[1,-1],
+                                                cor.test(all_scores$DisGeNET, all_scores$meanExpr)$p.value))
+rownames(cor_score_mean_expr) = c('Correlation','p-value')
+
+cor_score_mean_expr %>% kable %>% kable_styling(full_width = F)
+```
+
+<br>
+
+### Relation between mean expression and other neuronal disorders
+
+#### Percentage of SFARI Genes in other neuronal disorders
+
+The gene scores for other neuronal disorders were obtained from DisGeNET. The disorders selected were Schizophrenia (Scz), Bipolar Disorder (BD), Intellectual Disability (ID), Depressive Disorder (DD) and Chronic Alcohol Intoxication (CAI).
+
+A big proportion of the genes associated to all of these disorders belong to the SFARI Genes, the highest being Intellectual Disability with 24\% and the lowest Schizophrenia, with 18\%.
+
+```{r}
+disgenet_info = all_scores %>% dplyr::select(gene, meanExpr, SFARI) %>% 
+                dplyr::rename('gene_symbol' = gene) %>% mutate(SFARI = !is.na(SFARI)) %>%
+                left_join(DisGeNET[['asd']] %>% dplyr::rename('ASD'=score), by = 'gene_symbol') %>%
+                left_join(DisGeNET[['scz']] %>% dplyr::rename('Scz'=score), by = 'gene_symbol') %>%
+                left_join(DisGeNET[['bd']] %>% dplyr::rename('BD'=score), by = 'gene_symbol') %>%
+                left_join(DisGeNET[['id']] %>% dplyr::rename('ID'=score),by='gene_symbol')%>%
+                left_join(DisGeNET[['dd']] %>% dplyr::rename('DD'=score), by='gene_symbol') %>%
+                left_join(DisGeNET[['ai']] %>% dplyr::rename('CAI'=score), by = 'gene_symbol') %>%
+                dplyr::select(gene_symbol, meanExpr, ASD, Scz, BD, ID, DD, CAI, SFARI)
+
+perc_SFARI = data.frame('SFARI' = disgenet_info %>% filter(SFARI == TRUE) %>% 
+                                  dplyr::select('ASD','Scz','BD','ID','DD','CAI') %>% 
+                                  apply(2, function(x) sum(!is.na(x))),
+                        'Total' = disgenet_info %>% dplyr::select('ASD','Scz','BD','ID','DD','CAI') %>% 
+                                  apply(2, function(x) sum(!is.na(x)))) %>%
+             mutate(SFARI = 100*SFARI/Total)
+rownames(perc_SFARI) = c('ASD','Scz','BD','ID','DD','CAI')
+
+perc_SFARI %>% kable %>% kable_styling(full_width = F)
+```
+
+#### Scores of SFARI Genes in other disorders
+
+SFARI genes are not only over-represented in all disorders, but they also have higher scores than the rest of the genes associated to each disorder. This difference is statistically significant for all disorders except for Chronic Alcohol Intoxication.
+
+```{r warning=FALSE, fig.width=10}
+
+disgenet_info %>% dplyr::select(-gene_symbol) %>% reshape2::melt(id.vars = c('meanExpr', 'SFARI')) %>% 
+                  dplyr::rename('Disorder' = variable) %>% filter(!is.na(value)) %>%
+                  ggplot(aes(SFARI, value, fill = SFARI)) + 
+                  geom_boxplot(outlier.colour='gray', outlier.shape='o', outlier.size=3) + 
+                  facet_grid(~Disorder) + scale_y_log10(limits = c(NA, 0.7)) +
+                  stat_compare_means(label = 'p.signif', method = 't.test', method.args = list(var.equal=F)) +
+                  xlab('') + ylab('DisGeNET Score') + theme_minimal() + theme(legend.position = 'bottom')
+
+```
+
+#### Correlation between scores and mean expression of the genes
+
+ASD is the disorder with the highest correlation, followed by Schizophrenia and Bipolar Disorder, all three of them with p-values lower tan 0.05.
+
+
+```{r}
+
+cor_score_mean_expr = data.frame('Genes' =  disgenet_info %>% dplyr::select('ASD','Scz','BD','ID','DD','CAI') %>% 
+                                           apply(2, function(x) sum(!is.na(x))), 
+                                 'Correlation' = disgenet_info %>% dplyr::select('ASD','Scz','BD','ID','DD','CAI') %>% 
+                                                 apply(2, function(x) cor.test(x, disgenet_info$meanExpr)$estimate),
+                                 'p-value' = disgenet_info %>% dplyr::select('ASD','Scz','BD','ID','DD','CAI') %>% 
+                                             apply(2, function(x) cor.test(x, disgenet_info$meanExpr)$p.value))
+
+cor_score_mean_expr %>% kable %>% kable_styling(full_width = F)
+```
+
+
+But this relation weakens significantly when we remove the SFARI genes, even for the genes related to ASD, where Schizophrenia is the only disorder that still has a significant p-value.
+
+```{r}
+
+cor_score_mean_expr = data.frame('Genes' =  disgenet_info %>% filter(SFARI == FALSE) %>% 
+                                            dplyr::select('ASD','Scz','BD','ID','DD','CAI') %>% 
+                                            apply(2, function(x) sum(!is.na(x))),
+                                 'Correlation' = disgenet_info %>% filter(SFARI == FALSE) %>%
+                                                 dplyr::select('ASD','Scz','BD','ID','DD','CAI') %>% 
+                                                 apply(2, function(x) 
+                                                   cor.test(x, disgenet_info$meanExpr[!disgenet_info$SFARI])$estimate),
+                                 'p-value' = disgenet_info %>% filter(SFARI == FALSE) %>%
+                                             dplyr::select('ASD','Scz','BD','ID','DD','CAI') %>% 
+                                             apply(2, function(x) 
+                                               cor.test(x, disgenet_info$meanExpr[!disgenet_info$SFARI])$p.value))
+
+cor_score_mean_expr %>% kable %>% kable_styling(full_width = F)
+
+```
+
+<br>
+
+Taken together these results demonstrate that the unexpected profile of the mean level of expression observed for genes in the SFARI-gene list permeates not only to other ASD scoring systems, but, because of the important role this group of genes play in other neurodevelopmental disorders, it also has an impact in other neurodevelopmental disorders, especially Schizophrenia and Bipolar Disorder.
+
+---
+
+#### Session info
+
+```{r}
+sessionInfo()
+```
+<br><br>
